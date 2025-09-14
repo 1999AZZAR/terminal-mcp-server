@@ -49,7 +49,7 @@ function createServer() {
       tools: [
         {
           name: "execute_command",
-          description: "Execute commands on remote hosts or locally (This tool can be used for both remote hosts and the current machine)",
+          description: "Execute commands on remote hosts or locally with enhanced error handling, session management, and working directory support",
           inputSchema: {
             type: "object",
             properties: {
@@ -72,8 +72,17 @@ function createServer() {
               },
               env: {
                 type: "object",
-                description: "Environment variables",
+                description: "Environment variables to set for the command execution",
                 default: {}
+              },
+              workingDirectory: {
+                type: "string",
+                description: "Working directory for command execution (optional)"
+              },
+              timeout: {
+                type: "number",
+                description: "Command timeout in milliseconds (default: 30000)",
+                default: 30000
               }
             },
             required: ["command"]
@@ -93,14 +102,22 @@ function createServer() {
       const username = request.params.arguments?.username ? String(request.params.arguments.username) : undefined;
       const session = String(request.params.arguments?.session || "default");
       const command = String(request.params.arguments?.command);
+      const workingDirectory = request.params.arguments?.workingDirectory ? String(request.params.arguments.workingDirectory) : undefined;
+      const timeout = request.params.arguments?.timeout ? Number(request.params.arguments.timeout) : 30000;
+      
       if (!command) {
         throw new McpError(ErrorCode.InvalidParams, "Command is required");
       }
+      
       const env = request.params.arguments?.env || {};
 
-      // 如果指定了host但没有指定username
+      // Validate parameters
       if (host && !username) {
         throw new McpError(ErrorCode.InvalidParams, "Username is required when host is specified");
+      }
+      
+      if (timeout && (timeout < 1000 || timeout > 300000)) {
+        throw new McpError(ErrorCode.InvalidParams, "Timeout must be between 1000 and 300000 milliseconds");
       }
 
       try {
@@ -108,21 +125,42 @@ function createServer() {
           host,
           username,
           session,
-          env: env as Record<string, string>
+          env: env as Record<string, string>,
+          workingDirectory,
+          timeout
         });
+        
+        // Format output with exit code information
+        let outputText = `Command: ${command}\n`;
+        if (workingDirectory) {
+          outputText += `Working Directory: ${workingDirectory}\n`;
+        }
+        outputText += `Exit Code: ${result.exitCode || 0}\n\n`;
+        outputText += `STDOUT:\n${result.stdout}\n\n`;
+        if (result.stderr) {
+          outputText += `STDERR:\n${result.stderr}\n`;
+        }
         
         return {
           content: [{
             type: "text",
-            text: `Command Output:\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+            text: outputText
           }]
         };
       } catch (error) {
-        if (error instanceof Error && error.message.includes('SSH')) {
-          throw new McpError(
-            ErrorCode.InternalError,
-            `SSH connection error: ${error.message}. Please ensure SSH key-based authentication is set up.`
-          );
+        if (error instanceof Error) {
+          let errorMessage = error.message;
+          
+          // Provide more specific error messages
+          if (error.message.includes('SSH')) {
+            errorMessage = `SSH connection error: ${error.message}. Please ensure SSH key-based authentication is set up.`;
+          } else if (error.message.includes('timeout')) {
+            errorMessage = `Command execution timed out after ${timeout}ms. The command may still be running on the remote host.`;
+          } else if (error.message.includes('ENOENT')) {
+            errorMessage = `SSH key not found. Please ensure SSH key-based authentication is set up at ~/.ssh/id_rsa.`;
+          }
+          
+          throw new McpError(ErrorCode.InternalError, errorMessage);
         }
         throw error;
       }
@@ -154,11 +192,36 @@ async function main() {
     await server.connect(transport);
     log.info("Remote Ops MCP server running on stdio");
 
-    // 处理进程退出
-    process.on('SIGINT', async () => {
-      log.info("Shutting down server...");
-      await commandExecutor.disconnect();
-      process.exit(0);
+    // Handle process signals for graceful shutdown
+    const gracefulShutdown = async (signal: string) => {
+      log.info(`Received ${signal}, shutting down server gracefully...`);
+      try {
+        await commandExecutor.disconnect();
+        log.info("Server shutdown complete");
+        process.exit(0);
+      } catch (error) {
+        log.error(`Error during shutdown: ${error}`);
+        process.exit(1);
+      }
+    };
+
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
+    
+    // Handle uncaught exceptions
+    process.on('uncaughtException', (error) => {
+      log.error(`Uncaught exception: ${error.message}`);
+      if (error.stack) {
+        log.error(error.stack);
+      }
+      gracefulShutdown('uncaughtException');
+    });
+    
+    // Handle unhandled promise rejections
+    process.on('unhandledRejection', (reason, promise) => {
+      log.error(`Unhandled rejection at: ${promise}, reason: ${reason}`);
+      gracefulShutdown('unhandledRejection');
     });
   } catch (error) {
     log.error("Server error:", error);

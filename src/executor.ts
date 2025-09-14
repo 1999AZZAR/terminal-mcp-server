@@ -11,12 +11,19 @@ export class CommandExecutor {
     connection: Promise<void> | null;
     timeout: NodeJS.Timeout | null;
     host?: string;
-    env?: Record<string, string>; // 添加环境变量存储
-    shell?: any; // 添加shell会话
-    shellReady?: boolean; // shell是否准备好
+    username?: string;
+    env?: Record<string, string>;
+    shell?: any;
+    shellReady?: boolean;
+    workingDirectory?: string;
+    lastActivity?: number;
+    retryCount?: number;
+    maxRetries?: number;
   }> = new Map();
   
   private sessionTimeout: number = 20 * 60 * 1000; // 20 minutes
+  private maxRetries: number = 3;
+  private connectionTimeout: number = 30000; // 30 seconds
 
   constructor() {}
 
@@ -26,54 +33,150 @@ export class CommandExecutor {
 
   async connect(host: string, username: string, sessionName: string = 'default'): Promise<void> {
     const sessionKey = this.getSessionKey(host, sessionName);
-    const session = this.sessions.get(sessionKey);
+    let session = this.sessions.get(sessionKey);
     
-    // 如果会话存在且连接有效，直接返回现有连接
-    if (session?.connection && session?.client) {
-      // 检查客户端是否仍然连接
-      if (session.client.listenerCount('ready') > 0 || session.client.listenerCount('data') > 0) {
-        log.info(`Reusing existing session: ${sessionKey}`);
-        return session.connection;
-      }
-      // 如果客户端已断开连接，清理旧会话
-      log.info(`Session ${sessionKey} disconnected, creating new session`);
-      this.sessions.delete(sessionKey);
+    // Check if session exists and is still valid
+    if (session?.connection && session?.client && await this.isConnectionHealthy(session.client)) {
+      log.info(`Reusing existing healthy session: ${sessionKey}`);
+      this.updateActivity(sessionKey);
+      return session.connection;
+    }
+    
+    // Clean up invalid session
+    if (session) {
+      log.info(`Session ${sessionKey} is invalid, cleaning up and creating new session`);
+      await this.disconnectSession(sessionKey);
     }
 
+    // Attempt connection with retry logic
+    return this.connectWithRetry(host, username, sessionName);
+  }
+
+  private async isConnectionHealthy(client: Client): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (!client) {
+        resolve(false);
+        return;
+      }
+      
+      // Check if client has active listeners (indicating it's still connected)
+      const hasActiveListeners = client.listenerCount('ready') > 0 || 
+                                client.listenerCount('error') > 0 ||
+                                client.listenerCount('data') > 0;
+      
+      if (!hasActiveListeners) {
+        resolve(false);
+        return;
+      }
+      
+      // Try to send a keepalive to test the connection
+      try {
+        client.subsys('echo', (err, stream) => {
+          if (err) {
+            log.debug(`Connection health check failed: ${err.message}`);
+            resolve(false);
+            return;
+          }
+          
+          stream.on('data', () => {
+            stream.close();
+            resolve(true);
+          });
+          
+          stream.on('error', () => {
+            resolve(false);
+          });
+          
+          stream.write('health-check');
+          stream.end();
+        });
+      } catch (error) {
+        log.debug(`Connection health check error: ${error}`);
+        resolve(false);
+      }
+    });
+  }
+
+  private async connectWithRetry(host: string, username: string, sessionName: string): Promise<void> {
+    const sessionKey = this.getSessionKey(host, sessionName);
+    let retryCount = 0;
+    const maxRetries = this.maxRetries;
+
+    while (retryCount < maxRetries) {
+      try {
+        log.info(`Attempting connection to ${host} (attempt ${retryCount + 1}/${maxRetries})`);
+        await this.establishConnection(host, username, sessionName);
+        log.info(`Successfully connected to ${host}`);
+        return;
+      } catch (error) {
+        retryCount++;
+        const isLastAttempt = retryCount >= maxRetries;
+        
+        if (error instanceof Error) {
+          log.error(`Connection attempt ${retryCount} failed: ${error.message}`);
+          
+          if (isLastAttempt) {
+            throw new Error(`Failed to connect to ${host} after ${maxRetries} attempts. Last error: ${error.message}`);
+          }
+        }
+        
+        if (!isLastAttempt) {
+          const retryDelay = Math.min(1000 * Math.pow(2, retryCount - 1), 10000); // Exponential backoff, max 10s
+          log.info(`Retrying connection in ${retryDelay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        }
+      }
+    }
+  }
+
+  private async establishConnection(host: string, username: string, sessionName: string): Promise<void> {
+    const sessionKey = this.getSessionKey(host, sessionName);
+    
     try {
-      const privateKey = fs.readFileSync(path.join(os.homedir(), '.ssh', 'id_rsa'));
+      const privateKeyPath = path.join(os.homedir(), '.ssh', 'id_rsa');
+      
+      // Check if SSH key exists
+      if (!fs.existsSync(privateKeyPath)) {
+        throw new Error(`SSH key not found at ${privateKeyPath}. Please ensure SSH key-based authentication is set up.`);
+      }
+      
+      const privateKey = fs.readFileSync(privateKeyPath);
 
       const client = new Client();
       const connection = new Promise<void>((resolve, reject) => {
+        const connectionTimer = setTimeout(() => {
+          reject(new Error(`Connection timeout after ${this.connectionTimeout}ms`));
+          client.destroy();
+        }, this.connectionTimeout);
+
         client
           .on('ready', () => {
-            log.info(`Session ${sessionKey} connected`);
+            clearTimeout(connectionTimer);
+            log.info(`SSH connection established for session: ${sessionKey}`);
             this.resetTimeout(sessionKey);
             
-            // 创建一个交互式shell
-            client.shell((err, stream) => {
+            // Create interactive shell
+            client.shell({ term: 'xterm-256color' }, (err, stream) => {
               if (err) {
                 log.error(`Failed to create interactive shell: ${err.message}`);
-                reject(err);
+                reject(new Error(`Failed to create shell: ${err.message}`));
                 return;
               }
               
-              log.info(`Creating interactive shell for session ${sessionKey}`);
+              log.info(`Interactive shell created for session ${sessionKey}`);
               
-              // 获取会话对象
+              // Update session with shell information
               const sessionData = this.sessions.get(sessionKey);
               if (sessionData) {
-                // 设置shell和shellReady标志
                 sessionData.shell = stream;
                 sessionData.shellReady = true;
-                
-                // 更新会话
+                sessionData.workingDirectory = '/';
                 this.sessions.set(sessionKey, sessionData);
               }
               
-              // 处理shell关闭事件
+              // Handle shell events
               stream.on('close', () => {
-                log.info(`Interactive shell for session ${sessionKey} closed`);
+                log.info(`Interactive shell closed for session ${sessionKey}`);
                 const sessionData = this.sessions.get(sessionKey);
                 if (sessionData) {
                   sessionData.shellReady = false;
@@ -81,41 +184,82 @@ export class CommandExecutor {
                 }
               });
               
-              // 等待shell准备好
-              stream.write('echo "Shell ready"\n');
+              stream.on('error', (err: Error) => {
+                log.error(`Shell error for session ${sessionKey}: ${err.message}`);
+                const sessionData = this.sessions.get(sessionKey);
+                if (sessionData) {
+                  sessionData.shellReady = false;
+                  this.sessions.set(sessionKey, sessionData);
+                }
+              });
               
-              // 解析promise
+              // Initialize shell
+              stream.write('export PS1="$ "' + '\n');
+              stream.write('echo "Shell ready"' + '\n');
+              
               resolve();
             });
           })
           .on('error', (err) => {
-            log.error(`会话 ${sessionKey} 连接错误:`, err.message);
-            reject(err);
+            clearTimeout(connectionTimer);
+            log.error(`SSH connection error for session ${sessionKey}: ${err.message}`);
+            
+            // Provide more specific error messages
+            let errorMessage = err.message;
+            if (err.message.includes('ECONNREFUSED')) {
+              errorMessage = `Connection refused to ${host}. Check if SSH service is running and host is reachable.`;
+            } else if (err.message.includes('ETIMEDOUT')) {
+              errorMessage = `Connection timeout to ${host}. Check network connectivity and firewall settings.`;
+            } else if (err.message.includes('ENOTFOUND')) {
+              errorMessage = `Host ${host} not found. Check hostname or DNS resolution.`;
+            } else if (err.message.includes('authentication')) {
+              errorMessage = `Authentication failed for user ${username} on ${host}. Check SSH key permissions and user credentials.`;
+            }
+            
+            reject(new Error(errorMessage));
           })
           .connect({
             host: host,
             username: username,
             privateKey: privateKey,
-            keepaliveInterval: 60000, // 每分钟发送一次keepalive包
+            keepaliveInterval: 60000,
+            readyTimeout: this.connectionTimeout,
+            algorithms: {
+              serverHostKey: ['ssh-rsa', 'ssh-ed25519', 'ecdsa-sha2-nistp256']
+            }
           });
       });
 
-      log.info(`Creating new session: ${sessionKey}`);
+      // Store session information
       this.sessions.set(sessionKey, {
         client,
         connection,
         timeout: null,
         host,
+        username,
         shell: null,
-        shellReady: false
+        shellReady: false,
+        workingDirectory: '/',
+        lastActivity: Date.now(),
+        retryCount: 0,
+        maxRetries: this.maxRetries
       });
 
       return connection;
     } catch (error) {
       if (error instanceof Error && error.message.includes('ENOENT')) {
-        throw new Error('SSH key file does not exist, please ensure SSH key-based authentication is set up');
+        throw new Error(`SSH key file does not exist at ${path.join(os.homedir(), '.ssh', 'id_rsa')}. Please ensure SSH key-based authentication is set up.`);
       }
       throw error;
+    }
+  }
+
+  private updateActivity(sessionKey: string): void {
+    const session = this.sessions.get(sessionKey);
+    if (session) {
+      session.lastActivity = Date.now();
+      this.sessions.set(sessionKey, session);
+      this.resetTimeout(sessionKey);
     }
   }
 
@@ -142,246 +286,444 @@ export class CommandExecutor {
       username?: string;
       session?: string;
       env?: Record<string, string>;
+      workingDirectory?: string;
+      timeout?: number;
     } = {}
-  ): Promise<{stdout: string; stderr: string}> {
-    const { host, username, session = 'default', env = {} } = options;
+  ): Promise<{stdout: string; stderr: string; exitCode?: number}> {
+    const { 
+      host, 
+      username, 
+      session = 'default', 
+      env = {}, 
+      workingDirectory,
+      timeout = 30000 
+    } = options;
     const sessionKey = this.getSessionKey(host, session);
 
-    // 如果指定了host，则使用SSH执行命令
+    // Validate input
+    if (!command || command.trim().length === 0) {
+      throw new Error('Command cannot be empty');
+    }
+
+    // If host is specified, use SSH execution
     if (host) {
       if (!username) {
         throw new Error('Username is required when using SSH');
       }
       
-      let sessionData = this.sessions.get(sessionKey);
-      
-      // 检查会话是否存在且有效
-      let needNewConnection = false;
-      if (!sessionData || sessionData.host !== host) {
-        needNewConnection = true;
-      } else if (sessionData.client) {
-        // 检查客户端是否仍然连接
-        if (sessionData.client.listenerCount('ready') === 0 && sessionData.client.listenerCount('data') === 0) {
-          log.info(`Session ${sessionKey} disconnected, reconnecting`);
-          needNewConnection = true;
-        }
-      } else {
-        needNewConnection = true;
-      }
-      
-      // 如果需要新连接，则创建
-      if (needNewConnection) {
-        log.info(`Creating new connection for command execution: ${sessionKey}`);
+      try {
+        // Ensure we have a valid connection
         await this.connect(host, username, session);
-        sessionData = this.sessions.get(sessionKey);
-      } else {
-        log.info(`Reusing existing session for command execution: ${sessionKey}`);
-      }
-      
-      if (!sessionData || !sessionData.client) {
-        throw new Error(`无法创建到 ${host} 的SSH会话`);
-      }
-      
-      this.resetTimeout(sessionKey);
+        const sessionData = this.sessions.get(sessionKey);
+        
+        if (!sessionData || !sessionData.client) {
+          throw new Error(`Failed to establish SSH connection to ${host}`);
+        }
+        
+        this.updateActivity(sessionKey);
+        
+        // Update working directory if specified
+        if (workingDirectory && sessionData.workingDirectory !== workingDirectory) {
+          await this.changeWorkingDirectory(sessionKey, workingDirectory);
+        }
 
-      // 检查是否有交互式shell可用
-      if (sessionData.shellReady && sessionData.shell) {
-        log.info(`Executing command using interactive shell: ${command}`);
-        return new Promise((resolve, reject) => {
-          let stdout = "";
-          let stderr = "";
-          let commandFinished = false;
-          const uniqueMarker = `CMD_END_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
-          
-          // 构建环境变量设置命令
-          const envSetup = Object.entries(env)
-            .map(([key, value]) => `export ${key}="${String(value).replace(/"/g, '\\"')}"`)
-            .join(' && ');
-          
-          // 如果有环境变量，先设置环境变量，再执行命令
-          const fullCommand = envSetup ? `${envSetup} && ${command}` : command;
-          
-          // 添加数据处理器
-          const dataHandler = (data: Buffer) => {
-            const str = data.toString();
-            log.debug(`Shell数据: ${str}`);
-            
-            if (str.includes(uniqueMarker)) {
-              // 命令执行完成
-              commandFinished = true;
-              
-              // 提取命令输出（从命令开始到标记之前的内容）
-              const lines = stdout.split('\n');
-              let commandOutput = '';
-              let foundCommand = false;
-              
-              for (const line of lines) {
-                if (foundCommand) {
-                  if (line.includes(uniqueMarker)) {
-                    break;
-                  }
-                  commandOutput += line + '\n';
-                } else if (line.includes(fullCommand)) {
-                  foundCommand = true;
-                }
-              }
-              
-              // 解析输出
-              resolve({ stdout: commandOutput.trim(), stderr });
-              
-              // 移除处理器
-              sessionData.shell.removeListener('data', dataHandler);
-              clearTimeout(timeout);
-            } else if (!commandFinished) {
-              stdout += str;
-            }
-          };
-          
-          // 添加错误处理器
-          const errorHandler = (err: Error) => {
-            stderr += err.message;
-            reject(err);
-            sessionData.shell.removeListener('data', dataHandler);
-            sessionData.shell.removeListener('error', errorHandler);
-          };
-          
-          // 监听数据和错误
-          sessionData.shell.on('data', dataHandler);
-          sessionData.shell.on('error', errorHandler);
-          
-          // 执行命令并添加唯一标记
-          // 使用一个更明确的方式来执行命令和捕获输出
-          sessionData.shell.write(`echo "Starting command execution: ${fullCommand}"\n`);
-          sessionData.shell.write(`${fullCommand}\n`);
-          sessionData.shell.write(`echo "${uniqueMarker}"\n`);
-          
-          // 设置超时
-          const timeout = setTimeout(() => {
-            if (!commandFinished) {
-              stderr += "Command execution timed out";
-              resolve({ stdout, stderr });
-              sessionData.shell.removeListener('data', dataHandler);
-              sessionData.shell.removeListener('error', errorHandler);
-            }
-          }, 30000); // 30秒超时
-        });
-      } else {
-        log.info(`Executing command using exec: ${command}`);
-        return new Promise((resolve, reject) => {
-          // 构建环境变量设置命令
-          const envSetup = Object.entries(env)
-            .map(([key, value]) => `export ${key}="${String(value).replace(/"/g, '\\"')}"`)
-            .join(' && ');
-          
-          // 如果有环境变量，先设置环境变量，再执行命令
-          const fullCommand = envSetup ? `${envSetup} && ${command}` : command;
-          
-          sessionData?.client?.exec(`/bin/bash --login -c "${fullCommand.replace(/"/g, '\\"')}"`, (err, stream) => {
-            if (err) {
-              reject(err);
-              return;
-            }
-
-            let stdout = "";
-            let stderr = '';
-
-            stream
-              .on("data", (data: Buffer) => {
-                this.resetTimeout(sessionKey);
-                stdout += data.toString();
-              })
-              .stderr.on('data', (data: Buffer) => {
-                stderr += data.toString();
-              })
-              .on('close', () => {
-                resolve({ stdout, stderr });
-              })
-              .on('error', (err) => {
-                reject(err);
-              });
-          });
-        });
+        // Execute command using the most appropriate method
+        if (sessionData.shellReady && sessionData.shell) {
+          log.info(`Executing command using interactive shell: ${command}`);
+          return await this.executeWithShell(sessionKey, command, env, timeout);
+        } else {
+          log.info(`Executing command using exec: ${command}`);
+          return await this.executeWithExec(sessionKey, command, env, timeout);
+        }
+      } catch (error) {
+        log.error(`Command execution failed: ${error instanceof Error ? error.message : String(error)}`);
+        throw error;
       }
     } 
-    // 否则在本地执行命令
+    // Execute command locally
     else {
-      // 在本地执行命令时，也使用会话机制来保持环境变量
-      log.info(`Executing command using local session: ${sessionKey}`);
-      
-      // 检查是否已有本地会话
-      let sessionData = this.sessions.get(sessionKey);
-      let sessionEnv = {};
-      
-      if (!sessionData) {
-        // 为本地会话创建一个空条目，以便跟踪超时
-        sessionData = {
-          client: null,
-          connection: null,
-          timeout: null,
-          host: undefined,
-          env: { ...env } // 保存初始环境变量
-        };
-        this.sessions.set(sessionKey, sessionData);
-        log.info(`Creating new local session: ${sessionKey}`);
-        sessionEnv = env;
-      } else {
-        log.info(`Reusing existing local session: ${sessionKey}`);
-        // 合并现有会话环境变量和新的环境变量
-        if (!sessionData.env) {
-          sessionData.env = {};
+      log.info(`Executing command locally: ${command}`);
+      return await this.executeLocally(sessionKey, command, env, workingDirectory, timeout);
+    }
+  }
+
+  private async changeWorkingDirectory(sessionKey: string, newWorkingDirectory: string): Promise<void> {
+    const sessionData = this.sessions.get(sessionKey);
+    if (!sessionData || !sessionData.shellReady || !sessionData.shell) {
+      return;
+    }
+
+    return new Promise((resolve, reject) => {
+      const uniqueMarker = `CD_END_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+      let output = '';
+      let commandFinished = false;
+
+      const dataHandler = (data: Buffer) => {
+        const str = data.toString();
+        output += str;
+        
+        if (str.includes(uniqueMarker)) {
+          commandFinished = true;
+          sessionData.shell.removeListener('data', dataHandler);
+          sessionData.shell.removeListener('error', errorHandler);
+          clearTimeout(timeout);
+          
+          // Update working directory in session
+          sessionData.workingDirectory = newWorkingDirectory;
+          this.sessions.set(sessionKey, sessionData);
+          
+          resolve();
         }
-        sessionData.env = { ...sessionData.env, ...env };
-        sessionEnv = sessionData.env;
-        // 更新会话
-        this.sessions.set(sessionKey, sessionData);
+      };
+
+      const errorHandler = (err: Error) => {
+        sessionData.shell.removeListener('data', dataHandler);
+        sessionData.shell.removeListener('error', errorHandler);
+        clearTimeout(timeout);
+        reject(err);
+      };
+
+      sessionData.shell.on('data', dataHandler);
+      sessionData.shell.on('error', errorHandler);
+
+      sessionData.shell.write(`cd "${newWorkingDirectory}" && pwd && echo "${uniqueMarker}"\n`);
+
+      const timeout = setTimeout(() => {
+        if (!commandFinished) {
+          sessionData.shell.removeListener('data', dataHandler);
+          sessionData.shell.removeListener('error', errorHandler);
+          reject(new Error(`Working directory change timed out`));
+        }
+      }, 5000);
+    });
+  }
+
+  private async executeWithShell(
+    sessionKey: string, 
+    command: string, 
+    env: Record<string, string>, 
+    timeout: number
+  ): Promise<{stdout: string; stderr: string; exitCode?: number}> {
+    const sessionData = this.sessions.get(sessionKey);
+    if (!sessionData || !sessionData.shell) {
+      throw new Error('Shell session not available');
+    }
+
+    return new Promise((resolve, reject) => {
+      let stdout = "";
+      let stderr = "";
+      let commandFinished = false;
+      const uniqueMarker = `CMD_END_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+      
+      // Build environment variable setup
+      const envSetup = Object.entries(env)
+        .map(([key, value]) => `export ${key}="${String(value).replace(/"/g, '\\"')}"`)
+        .join(' && ');
+      
+      // Build full command with environment variables
+      const fullCommand = envSetup ? `${envSetup} && ${command}` : command;
+      
+      const dataHandler = (data: Buffer) => {
+        const str = data.toString();
+        log.debug(`Shell output: ${str}`);
+        
+        if (str.includes(uniqueMarker)) {
+          commandFinished = true;
+          
+          // Extract command output more reliably
+          const lines = stdout.split('\n');
+          let commandOutput = '';
+          let foundCommand = false;
+          let exitCode = 0;
+          
+          for (const line of lines) {
+            if (line.includes(`echo "Exit code: $?"`)) {
+              const match = line.match(/Exit code: (\d+)/);
+              if (match) {
+                exitCode = parseInt(match[1], 10);
+              }
+              continue;
+            }
+            
+            if (foundCommand) {
+              if (line.includes(uniqueMarker)) {
+                break;
+              }
+              commandOutput += line + '\n';
+            } else if (line.includes(fullCommand) || line.includes(command)) {
+              foundCommand = true;
+            }
+          }
+          
+          resolve({ 
+            stdout: commandOutput.trim(), 
+            stderr: stderr.trim(),
+            exitCode: exitCode
+          });
+          
+          sessionData.shell.removeListener('data', dataHandler);
+          sessionData.shell.removeListener('error', errorHandler);
+          clearTimeout(timeoutId);
+        } else if (!commandFinished) {
+          stdout += str;
+        }
+      };
+      
+      const errorHandler = (err: Error) => {
+        stderr += err.message;
+        sessionData.shell.removeListener('data', dataHandler);
+        sessionData.shell.removeListener('error', errorHandler);
+        clearTimeout(timeoutId);
+        reject(err);
+      };
+      
+      sessionData.shell.on('data', dataHandler);
+      sessionData.shell.on('error', errorHandler);
+      
+      // Execute command with proper output capture
+      sessionData.shell.write(`${fullCommand}; echo "Exit code: $?"\n`);
+      sessionData.shell.write(`echo "${uniqueMarker}"\n`);
+      
+      const timeoutId = setTimeout(() => {
+        if (!commandFinished) {
+          stderr += "Command execution timed out";
+          sessionData.shell.removeListener('data', dataHandler);
+          sessionData.shell.removeListener('error', errorHandler);
+          resolve({ stdout, stderr, exitCode: 124 }); // 124 is timeout exit code
+        }
+      }, timeout);
+    });
+  }
+
+  private async executeWithExec(
+    sessionKey: string, 
+    command: string, 
+    env: Record<string, string>, 
+    timeout: number
+  ): Promise<{stdout: string; stderr: string; exitCode?: number}> {
+    const sessionData = this.sessions.get(sessionKey);
+    if (!sessionData || !sessionData.client) {
+      throw new Error('SSH client not available');
+    }
+
+    return new Promise((resolve, reject) => {
+      // Build environment variable setup
+      const envSetup = Object.entries(env)
+        .map(([key, value]) => `export ${key}="${String(value).replace(/"/g, '\\"')}"`)
+        .join(' && ');
+      
+      // Build full command with environment variables
+      const fullCommand = envSetup ? `${envSetup} && ${command}` : command;
+      
+      if (!sessionData.client) {
+        reject(new Error('SSH client not available'));
+        return;
+      }
+
+      sessionData.client.exec(`/bin/bash --login -c "${fullCommand.replace(/"/g, '\\"')}"`, (err, stream) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        let stdout = "";
+        let stderr = '';
+        let exitCode = 0;
+
+        stream
+          .on("data", (data: Buffer) => {
+            this.updateActivity(sessionKey);
+            stdout += data.toString();
+          })
+          .stderr.on('data', (data: Buffer) => {
+            stderr += data.toString();
+          })
+          .on('close', (code: number) => {
+            exitCode = code;
+            resolve({ stdout, stderr, exitCode });
+          })
+          .on('error', (err) => {
+            reject(err);
+          });
+
+        // Set timeout for the entire operation
+        setTimeout(() => {
+          stream.close();
+          resolve({ 
+            stdout, 
+            stderr: stderr + "Command execution timed out", 
+            exitCode: 124 
+          });
+        }, timeout);
+      });
+    });
+  }
+
+  private async executeLocally(
+    sessionKey: string, 
+    command: string, 
+    env: Record<string, string>, 
+    workingDirectory?: string,
+    timeout: number = 30000
+  ): Promise<{stdout: string; stderr: string; exitCode?: number}> {
+    // Get or create local session
+    let sessionData = this.sessions.get(sessionKey);
+    
+    if (!sessionData) {
+      sessionData = {
+        client: null,
+        connection: null,
+        timeout: null,
+        env: { ...env },
+        workingDirectory: workingDirectory || process.cwd()
+      };
+      this.sessions.set(sessionKey, sessionData);
+      log.info(`Creating new local session: ${sessionKey}`);
+    } else {
+      // Merge environment variables
+      if (!sessionData.env) {
+        sessionData.env = {};
+      }
+      sessionData.env = { ...sessionData.env, ...env };
+      
+      // Update working directory if specified
+      if (workingDirectory) {
+        sessionData.workingDirectory = workingDirectory;
       }
       
-      this.resetTimeout(sessionKey);
-      
-      return new Promise((resolve, reject) => {
-        // 构建环境变量，优先级：系统环境变量 < 会话环境变量 < 当前命令环境变量
-        const envVars = { ...process.env, ...sessionEnv };
-        
-        // 执行命令
-        log.info(`Executing local command: ${command}`);
-        exec(command, { env: envVars }, (error, stdout, stderr) => {
-          if (error && error.code !== 0) {
-            // 我们不直接拒绝，而是返回错误信息作为stderr
-            resolve({ stdout, stderr: stderr || error.message });
-          } else {
-            resolve({ stdout, stderr });
-          }
-        });
-      });
+      this.sessions.set(sessionKey, sessionData);
     }
+    
+    this.resetTimeout(sessionKey);
+    
+    return new Promise((resolve, reject) => {
+      // Build environment variables
+      const envVars = { ...process.env, ...sessionData.env };
+      
+      // Execute command
+      log.info(`Executing local command: ${command}`);
+      const childProcess = exec(command, { 
+        env: envVars,
+        cwd: sessionData.workingDirectory,
+        timeout: timeout
+      }, (error, stdout, stderr) => {
+        const exitCode = error ? (error.code || 1) : 0;
+        
+        if (error && (error as any).code === 'TIMEOUT') {
+          resolve({ 
+            stdout, 
+            stderr: stderr + `\nCommand timed out after ${timeout}ms`, 
+            exitCode: 124 
+          });
+        } else {
+          resolve({ stdout, stderr, exitCode });
+        }
+      });
+
+      // Handle process termination
+      childProcess.on('error', (error) => {
+        reject(new Error(`Process error: ${error.message}`));
+      });
+    });
   }
 
   private async disconnectSession(sessionKey: string): Promise<void> {
     const session = this.sessions.get(sessionKey);
-    if (session) {
+    if (!session) {
+      return;
+    }
+
+    try {
+      log.info(`Disconnecting session: ${sessionKey}`);
+      
+      // Close shell first
       if (session.shell) {
         log.info(`Closing interactive shell for session ${sessionKey}`);
-        session.shell.end();
-        session.shellReady = false;
+        try {
+          session.shell.end();
+          session.shellReady = false;
+        } catch (error) {
+          log.warn(`Error closing shell for session ${sessionKey}: ${error}`);
+        }
       }
+      
+      // Close SSH client
       if (session.client) {
         log.info(`Disconnecting SSH connection for session ${sessionKey}`);
-        session.client.end();
+        try {
+          session.client.end();
+        } catch (error) {
+          log.warn(`Error closing SSH client for session ${sessionKey}: ${error}`);
+        }
       }
+      
+      // Clear timeout
       if (session.timeout) {
         clearTimeout(session.timeout);
       }
-      log.info(`Disconnecting session: ${sessionKey}`);
+      
+      // Remove session
+      this.sessions.delete(sessionKey);
+      log.info(`Successfully disconnected session: ${sessionKey}`);
+    } catch (error) {
+      log.error(`Error during session disconnection ${sessionKey}: ${error}`);
+      // Force remove session even if cleanup failed
       this.sessions.delete(sessionKey);
     }
   }
 
   async disconnect(): Promise<void> {
-    const disconnectPromises = Array.from(this.sessions.keys()).map(
+    log.info(`Disconnecting all sessions...`);
+    
+    const sessionKeys = Array.from(this.sessions.keys());
+    if (sessionKeys.length === 0) {
+      log.info(`No active sessions to disconnect`);
+      return;
+    }
+
+    const disconnectPromises = sessionKeys.map(
       sessionKey => this.disconnectSession(sessionKey)
     );
     
-    await Promise.all(disconnectPromises);
-    this.sessions.clear();
+    try {
+      await Promise.allSettled(disconnectPromises);
+      log.info(`All sessions disconnected`);
+    } catch (error) {
+      log.error(`Error during bulk disconnection: ${error}`);
+    } finally {
+      this.sessions.clear();
+    }
+  }
+
+  // Add method to get session information for debugging
+  getSessionInfo(): Array<{
+    sessionKey: string;
+    host?: string;
+    username?: string;
+    workingDirectory?: string;
+    lastActivity?: number;
+    shellReady: boolean;
+  }> {
+    return Array.from(this.sessions.entries()).map(([sessionKey, session]) => ({
+      sessionKey,
+      host: session.host,
+      username: session.username,
+      workingDirectory: session.workingDirectory,
+      lastActivity: session.lastActivity,
+      shellReady: session.shellReady || false
+    }));
+  }
+
+  // Add method to cleanup inactive sessions
+  cleanupInactiveSessions(): void {
+    const now = Date.now();
+    const inactiveThreshold = 5 * 60 * 1000; // 5 minutes
+    
+    for (const [sessionKey, session] of this.sessions.entries()) {
+      if (session.lastActivity && (now - session.lastActivity) > inactiveThreshold) {
+        log.info(`Cleaning up inactive session: ${sessionKey}`);
+        this.disconnectSession(sessionKey);
+      }
+    }
   }
 }
