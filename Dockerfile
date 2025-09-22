@@ -17,7 +17,7 @@ COPY . .
 # Build the application
 RUN npm run build
 
-# Expose port 8080 for SSE mode (if used)
+# Expose port 8080 (for potential future HTTP mode)
 EXPOSE 8080
 
 # Command to run the application

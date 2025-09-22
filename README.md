@@ -19,7 +19,7 @@ Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for
 - **Enhanced Error Handling**: Detailed error messages with automatic retry mechanisms for SSH connections
 - **Robust Session Management**: Automatic connection pooling, reconnection, and graceful cleanup
 - **Exit Code Reporting**: Commands return proper exit codes for better error detection
-- **Multiple Connection Methods**: Connect via stdio or SSE (Server-Sent Events)
+- **Stdio Connection**: Connect via standard input/output for direct integration
 
 ## Installation
 
@@ -56,34 +56,18 @@ npm start
 node build/index.js
 ```
 
-### Starting the Server in SSE Mode
+### Server Configuration
 
-The SSE (Server-Sent Events) mode allows you to connect to the server remotely via HTTP.
-
-```bash
-# Start the server in SSE mode
-npm run start:sse
-
-# Or run the built file directly with SSE flag
-node build/index.js --sse
-```
-
-You can customize the SSE server with the following command-line options:
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--port` or `-p` | The port to listen on | 8080 |
-| `--endpoint` or `-e` | The endpoint path | /sse |
-| `--host` or `-h` | The host to bind to | localhost |
-
-Example with custom options:
+The server runs in stdio mode by default, which is perfect for direct integration with MCP clients. You can enable debug logging by setting the `DEBUG` environment variable:
 
 ```bash
-# Start SSE server on port 3000, endpoint /mcp, and bind to all interfaces
-node build/index.js --sse --port 3000 --endpoint /mcp --host 0.0.0.0
-```
+# Run with debug logging
+DEBUG=true node build/index.js
 
-This will start the server and listen for SSE connections at `http://0.0.0.0:3000/mcp`.
+# Or set it as an environment variable
+export DEBUG=true
+node build/index.js
+```
 
 ### Testing with MCP Inspector
 
@@ -180,20 +164,6 @@ The execute_command tool is the core functionality provided by Terminal MCP Serv
 }
 ```
 
-#### For SSE mode (remote connection)
-
-```json
-{
-  "mcpServers": {
-    "terminal-mcp-sse": {
-      "url": "http://localhost:8080/sse",
-      "headers": {}
-    }
-  }
-}
-```
-
-Replace `localhost:8080/sse` with your actual server address, port, and endpoint if you've customized them.
 
 ### Configuring with Cline
 
@@ -214,18 +184,6 @@ Replace `localhost:8080/sse` with your actual server address, port, and endpoint
 }
 ```
 
-#### For SSE mode (remote connection)
-
-```json
-{
-  "mcpServers": {
-    "terminal-mcp-sse": {
-      "url": "http://localhost:8080/sse",
-      "headers": {}
-    }
-  }
-}
-```
 
 ### Configuring with Claude Desktop
 
@@ -246,18 +204,6 @@ Replace `localhost:8080/sse` with your actual server address, port, and endpoint
 }
 ```
 
-#### For SSE mode (remote connection)
-
-```json
-{
-  "mcpServers": {
-    "terminal-mcp-sse": {
-      "url": "http://localhost:8080/sse",
-      "headers": {}
-    }
-  }
-}
-```
 
 ## Best Practices
 
