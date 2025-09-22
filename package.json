@@ -1,8 +1,11 @@
 {
   "name": "terminal-mcp-server",
-  "version": "0.1.0",
-  "description": "操作X主机",
-  "private": true,
+  "version": "1.0.0",
+  "description": "A robust MCP server for executing commands locally and remotely via SSH with enhanced session management and error handling",
+  "keywords": ["mcp", "terminal", "ssh", "remote", "command-execution"],
+  "author": "Terminal MCP Server Contributors",
+  "license": "MIT",
+  "private": false,
   "type": "module",
   "bin": {
     "terminal-mcp-server": "./build/index.js"
@@ -15,8 +18,17 @@
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",
-    "start": "node build/index.js"
+    "start": "node build/index.js",
+    "test": "npm run build && npm run inspector"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1999AZZAR/terminal-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/1999AZZAR/terminal-mcp-server/issues"
+  },
+  "homepage": "https://github.com/1999AZZAR/terminal-mcp-server#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.0",
     "ssh2": "^1.16.0"

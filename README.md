@@ -1,9 +1,12 @@
 # Terminal MCP Server
-[![smithery badge](https://smithery.ai/badge/@weidwonder/terminal-mcp-server)](https://smithery.ai/server/@weidwonder/terminal-mcp-server)
 
-*[中文文档](README_CN.md)*
+[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://choosealicense.com/licenses/mit/)
+[![npm version](https://badge.fury.io/js/terminal-mcp-server.svg)](https://badge.fury.io/js/terminal-mcp-server)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.3+-blue.svg)](https://www.typescriptlang.org/)
 
-Terminal MCP Server is a Model Context Protocol (MCP) server that allows executing commands on local or remote hosts. It provides a simple yet powerful interface for AI models and other applications to execute system commands, either on the local machine or on remote hosts via SSH.
+Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for executing commands on local and remote hosts via SSH. It provides a simple yet powerful interface for AI models and other applications to execute system commands with enhanced session management, error handling, and reliability features.
+
+> **Note**: This is a maintained fork of the original project with significant robustness improvements and new features.
 
 ## Features
 
@@ -22,16 +25,16 @@ Terminal MCP Server is a Model Context Protocol (MCP) server that allows executi
 
 ### Installing via Smithery
 
-To install terminal-mcp-server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@weidwonder/terminal-mcp-server):
+To install terminal-mcp-server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@1999AZZAR/terminal-mcp-server):
 
 ```bash
-npx -y @smithery/cli install @weidwonder/terminal-mcp-server --client claude
+npx -y @smithery/cli install @1999AZZAR/terminal-mcp-server --client claude
 ```
 
 ### Manual Installation
 ```bash
 # Clone the repository
-git clone https://github.com/weidwonder/terminal-mcp-server.git
+git clone https://github.com/1999AZZAR/terminal-mcp-server.git
 cd terminal-mcp-server
 
 # Install dependencies
