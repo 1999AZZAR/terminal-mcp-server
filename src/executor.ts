@@ -596,6 +596,29 @@ export class CommandExecutor {
     
     this.resetTimeout(sessionKey);
     
+    // Check if command is trying to set environment variables
+    const exportMatch = command.match(/^\s*export\s+([^=]+)=(.*)$/);
+    if (exportMatch) {
+      const [, varName, varValue] = exportMatch;
+      // Remove quotes from the value
+      const cleanValue = varValue.replace(/^["']|["']$/g, '');
+      
+      // Ensure env object exists
+      if (!sessionData.env) {
+        sessionData.env = {};
+      }
+      
+      sessionData.env[varName.trim()] = cleanValue;
+      this.sessions.set(sessionKey, sessionData);
+      log.info(`Set environment variable ${varName.trim()}=${cleanValue} in session ${sessionKey}`);
+      
+      return Promise.resolve({ 
+        stdout: `Environment variable ${varName.trim()} set to ${cleanValue}`, 
+        stderr: '', 
+        exitCode: 0 
+      });
+    }
+    
     return new Promise((resolve, reject) => {
       // Build environment variables
       const envVars = { ...process.env, ...sessionData.env };
