@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Documentation**: Removed unnecessary Chinese documentation and AI project info files
 
 ### Fixed
+- **Export Command Parsing**: Fixed critical bug where export commands with chained commands (e.g., `export FOO=bar; ls`) were incorrectly handled, preventing subsequent commands from executing. Now properly detects chained commands and allows shell to handle them normally while still intercepting standalone export commands for session persistence.
+- **Quote Removal Logic**: Fixed unsafe quote removal that could corrupt environment variable values. Now only removes quotes when they form proper matching pairs at the beginning and end of values, preventing corruption of values like `"foo'` or `hello"`.
 - **Session Persistence**: Fixed environment variable persistence across commands by implementing proper export command handling in local execution
 - **SSH Connection Health**: Improved connection health monitoring and automatic reconnection
 - **Memory Management**: Better session lifecycle management and cleanup

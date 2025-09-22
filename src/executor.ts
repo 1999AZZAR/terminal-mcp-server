@@ -263,6 +263,39 @@ export class CommandExecutor {
     }
   }
 
+  /**
+   * Safely removes matching quotes from the beginning and end of a string.
+   * Only removes quotes if they form a proper matching pair at the very beginning and end.
+   * Examples:
+   * - "hello" -> hello
+   * - 'world' -> world
+   * - "foo' -> "foo' (unchanged, unmatched quotes)
+   * - hello" -> hello" (unchanged, unmatched quotes)
+   * - "hello"world" -> "hello"world" (unchanged, quotes not at very beginning/end)
+   * - "hello world" -> hello world
+   */
+  private removeMatchingQuotes(value: string): string {
+    if (value.length < 2) {
+      return value;
+    }
+
+    const firstChar = value[0];
+    const lastChar = value[value.length - 1];
+
+    // Only remove quotes if they match and are at the very beginning and end
+    // This ensures we don't accidentally remove quotes from strings like "hello"world"
+    if ((firstChar === '"' && lastChar === '"') || (firstChar === "'" && lastChar === "'")) {
+      // Double-check that there are no quotes of the same type in between
+      const quoteType = firstChar;
+      const middle = value.slice(1, -1);
+      if (!middle.includes(quoteType)) {
+        return middle;
+      }
+    }
+
+    return value;
+  }
+
   private resetTimeout(sessionKey: string): void {
     const session = this.sessions.get(sessionKey);
     if (!session) return;
@@ -597,26 +630,36 @@ export class CommandExecutor {
     this.resetTimeout(sessionKey);
     
     // Check if command is trying to set environment variables
-    const exportMatch = command.match(/^\s*export\s+([^=]+)=(.*)$/);
+    // Only handle standalone export commands (not chained with other commands)
+    const exportMatch = command.match(/^\s*export\s+([^=;|&]+)=([^;|&]*)(?:\s*$|\s*;|\s*&&|\s*\|\|)/);
     if (exportMatch) {
       const [, varName, varValue] = exportMatch;
-      // Remove quotes from the value
-      const cleanValue = varValue.replace(/^["']|["']$/g, '');
       
-      // Ensure env object exists
-      if (!sessionData.env) {
-        sessionData.env = {};
+      // Check if there are additional commands after the export
+      const hasChainedCommands = /^\s*export\s+[^=;|&]+=[^;|&]*\s*[;|&]/.test(command);
+      
+      if (hasChainedCommands) {
+        // If there are chained commands, don't intercept - let the shell handle it
+        log.info(`Export command with chained commands detected, executing normally: ${command}`);
+      } else {
+        // Only handle standalone export commands
+        const cleanValue = this.removeMatchingQuotes(varValue.trim());
+        
+        // Ensure env object exists
+        if (!sessionData.env) {
+          sessionData.env = {};
+        }
+        
+        sessionData.env[varName.trim()] = cleanValue;
+        this.sessions.set(sessionKey, sessionData);
+        log.info(`Set environment variable ${varName.trim()}=${cleanValue} in session ${sessionKey}`);
+        
+        return Promise.resolve({ 
+          stdout: `Environment variable ${varName.trim()} set to ${cleanValue}`, 
+          stderr: '', 
+          exitCode: 0 
+        });
       }
-      
-      sessionData.env[varName.trim()] = cleanValue;
-      this.sessions.set(sessionKey, sessionData);
-      log.info(`Set environment variable ${varName.trim()}=${cleanValue} in session ${sessionKey}`);
-      
-      return Promise.resolve({ 
-        stdout: `Environment variable ${varName.trim()} set to ${cleanValue}`, 
-        stderr: '', 
-        exitCode: 0 
-      });
     }
     
     return new Promise((resolve, reject) => {
