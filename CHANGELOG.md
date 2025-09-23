@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Enhanced Error Handling**: Detailed error messages with automatic retry mechanisms for SSH connections
 - **Exit Code Reporting**: Commands now return proper exit codes for better error detection
 - **Structured Output**: Better formatted output with command, working directory, exit code, stdout, and stderr
+- **Clean Environment Mode**: Added `./run-clean.sh` script and `npm run start:clean` to bypass problematic shell configurations
+- **NPM Scripts**: Added convenient npm scripts for development and deployment
 - **MIT License**: Added proper MIT license for open source distribution
 - **Comprehensive .gitignore**: Added proper gitignore file for Node.js projects
 - **Enhanced package.json**: Updated with proper metadata, keywords, and repository information
@@ -26,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Export Command Parsing**: Fixed critical bug where export commands with chained commands (e.g., `export FOO=bar; ls`) were incorrectly handled, preventing subsequent commands from executing. Now properly detects chained commands and allows shell to handle them normally while still intercepting standalone export commands for session persistence.
 - **Quote Removal Logic**: Fixed unsafe quote removal that could corrupt environment variable values. Now only removes quotes when they form proper matching pairs at the beginning and end of values, preventing corruption of values like `"foo'` or `hello"`.
+- **Shell Configuration Errors**: Added clean environment mode to bypass problematic shell configurations (oh-my-bash, alias-hub) that cause syntax errors. Users can now use `./run-clean.sh` or `npm run start:clean` to run the server without shell interference.
 - **Session Persistence**: Fixed environment variable persistence across commands by implementing proper export command handling in local execution
 - **SSH Connection Health**: Improved connection health monitoring and automatic reconnection
 - **Memory Management**: Better session lifecycle management and cleanup

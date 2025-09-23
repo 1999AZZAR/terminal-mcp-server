@@ -48,6 +48,7 @@ npm run build
 
 ### Starting the Server
 
+#### Standard Mode
 ```bash
 # Start the server using stdio (default mode)
 npm start
@@ -55,6 +56,29 @@ npm start
 # Or run the built file directly
 node build/index.js
 ```
+
+#### Clean Environment Mode (Recommended)
+If you experience shell configuration errors like:
+```
+--: eval: line 8551: syntax error near unexpected token `('
+--: eval: line 8551: `back () '
+--: line 1: dump_bash_state: command not found
+```
+
+Use the clean environment runner to bypass problematic shell configurations:
+
+```bash
+# Use the clean runner script
+./run-clean.sh
+
+# Or use npm script
+npm run start:clean
+
+# Or manually with clean bash
+bash --noprofile --norc -c "node build/index.js"
+```
+
+The clean environment mode uses `bash --noprofile --norc` to avoid loading `.bashrc`, `.bash_profile`, and other shell configuration files that might contain malformed functions or aliases.
 
 ### Server Configuration
 
@@ -74,6 +98,28 @@ node build/index.js
 ```bash
 # Start the MCP Inspector tool
 npm run inspector
+```
+
+### Available NPM Scripts
+
+```bash
+# Build the project
+npm run build
+
+# Start the server (standard mode)
+npm start
+
+# Start the server in clean environment (recommended)
+npm run start:clean
+
+# Start with file watching for development
+npm run watch
+
+# Run the MCP Inspector for testing
+npm run inspector
+
+# Run tests
+npm test
 ```
 
 ## The execute_command Tool
@@ -273,6 +319,66 @@ STDERR:
 - **0**: Command executed successfully
 - **Non-zero**: Command failed or encountered an error
 - **124**: Command timed out (when using timeout parameter)
+
+## Troubleshooting
+
+### Shell Configuration Errors
+
+If you encounter errors like:
+```
+--: eval: line 8551: syntax error near unexpected token `('
+--: eval: line 8551: `back () '
+--: line 1: dump_bash_state: command not found
+```
+
+These errors are caused by problematic shell configurations (oh-my-bash, alias-hub, or custom functions). Use the clean environment mode:
+
+```bash
+# Recommended solution
+./run-clean.sh
+
+# Alternative solutions
+npm run start:clean
+bash --noprofile --norc -c "node build/index.js"
+```
+
+### SSH Connection Issues
+
+For SSH connection problems:
+
+1. **Check SSH key permissions**:
+   ```bash
+   chmod 600 ~/.ssh/id_rsa
+   chmod 644 ~/.ssh/id_rsa.pub
+   ```
+
+2. **Test SSH connection manually**:
+   ```bash
+   ssh -i ~/.ssh/id_rsa username@hostname
+   ```
+
+3. **Enable debug logging**:
+   ```bash
+   DEBUG=true npm run start:clean
+   ```
+
+### Environment Variable Issues
+
+If environment variables aren't persisting:
+
+1. **Check export command syntax**:
+   ```bash
+   # Correct
+   export VAR=value
+   
+   # Incorrect (will be intercepted)
+   export VAR=value; ls
+   ```
+
+2. **Use proper quoting**:
+   ```bash
+   export VAR="value with spaces"
+   ```
 
 ## Important Notes
 

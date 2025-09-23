@@ -19,7 +19,9 @@
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",
     "start": "node build/index.js",
+    "start:clean": "./run-clean.sh",
     "test": "npm run build && npm run inspector",
+    "fix-shell": "./fix-shell.sh",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix"
   },
