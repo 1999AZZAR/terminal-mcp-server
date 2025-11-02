@@ -21,6 +21,103 @@ Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for
 - **Exit Code Reporting**: Commands return proper exit codes for better error detection
 - **Stdio Connection**: Connect via standard input/output for direct integration
 
+## Available Resources
+
+Terminal MCP Server provides **2 key resources** that enhance reliability and performance by providing system visibility and session management capabilities:
+
+### `terminal://sessions/status`
+Returns comprehensive information about active terminal sessions, including connection health, working directories, environment variables, and session timeouts.
+
+**Resource Details:**
+- **Purpose**: Monitor active sessions and their health status
+- **Benefits**: Enables better session management, troubleshooting, and resource cleanup
+- **Performance Impact**: Minimal - cached session data with lightweight health checks
+- **Reliability**: Helps prevent session conflicts and enables proactive session management
+
+**Response Format:**
+```json
+{
+  "summary": {
+    "totalSessions": 3,
+    "activeSessions": 2,
+    "healthySessions": 2,
+    "localSessions": 1,
+    "remoteSessions": 1
+  },
+  "sessions": {
+    "local": [
+      {
+        "sessionKey": "local-default",
+        "host": "local",
+        "isActive": true,
+        "isHealthy": true,
+        "workingDirectory": "/home/user/projects",
+        "environmentVariables": ["PATH", "HOME", "SHELL"],
+        "lastActivity": "2025-11-02T17:09:14.866Z",
+        "timeUntilExpiry": 1200000,
+        "shellReady": true,
+        "retryCount": 0,
+        "maxRetries": 3
+      }
+    ],
+    "remote": [
+      {
+        "sessionKey": "remote-server-default",
+        "host": "remote-server",
+        "username": "user",
+        "isActive": true,
+        "isHealthy": true,
+        "workingDirectory": "/var/www",
+        "environmentVariables": ["NODE_ENV", "PORT"],
+        "lastActivity": "2025-11-02T17:08:45.123Z",
+        "timeUntilExpiry": 1180000,
+        "shellReady": true,
+        "retryCount": 1,
+        "maxRetries": 3
+      }
+    ]
+  },
+  "configuration": {
+    "sessionTimeoutMinutes": 20,
+    "maxRetries": 3,
+    "connectionTimeoutMs": 30000
+  },
+  "timestamp": "2025-11-02T17:09:14.866Z"
+}
+```
+
+### `terminal://system/info`
+Provides basic system information to help with command execution planning and troubleshooting.
+
+**Resource Details:**
+- **Purpose**: System environment information for better command execution
+- **Benefits**: Helps determine appropriate commands and paths for the current system
+- **Performance Impact**: Very low - static system information
+- **Reliability**: Provides context for command execution and error diagnosis
+
+**Response Format:**
+```json
+{
+  "platform": "linux",
+  "arch": "x64",
+  "nodeVersion": "v18.17.0",
+  "uptime": 3600.5,
+  "memory": {
+    "rss": 52428800,
+    "heapTotal": 20971520,
+    "heapUsed": 10485760,
+    "external": 2048000
+  },
+  "cwd": "/home/user/projects/terminal-mcp-server",
+  "env": {
+    "SHELL": "/bin/bash",
+    "USER": "user",
+    "HOME": "/home/user"
+  },
+  "timestamp": "2025-11-02T17:09:14.866Z"
+}
+```
+
 ## Installation
 
 ### Installing via Smithery

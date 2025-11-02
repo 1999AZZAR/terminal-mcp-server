@@ -792,4 +792,51 @@ export class CommandExecutor {
       }
     }
   }
+
+  async getSessionStatus(): Promise<any> {
+    const sessions = await Promise.all(Array.from(this.sessions.entries()).map(async ([sessionKey, session]) => {
+      const isActive = session.client && session.connection;
+      const isHealthy = isActive ? await this.isConnectionHealthy(session.client!) : false;
+      const lastActivity = session.lastActivity ? new Date(session.lastActivity).toISOString() : null;
+      const timeUntilExpiry = session.timeout ? (session.timeout as any)._idleTimeout : null;
+
+      return {
+        sessionKey,
+        host: session.host || 'local',
+        username: session.username,
+        isActive,
+        isHealthy,
+        workingDirectory: session.workingDirectory,
+        environmentVariables: session.env ? Object.keys(session.env) : [],
+        lastActivity,
+        timeUntilExpiry,
+        shellReady: session.shellReady || false,
+        retryCount: session.retryCount || 0,
+        maxRetries: session.maxRetries || this.maxRetries,
+      };
+    }));
+
+    const localSessions = sessions.filter(s => s.host === 'local');
+    const remoteSessions = sessions.filter(s => s.host !== 'local');
+
+    return {
+      summary: {
+        totalSessions: sessions.length,
+        activeSessions: sessions.filter(s => s.isActive).length,
+        healthySessions: sessions.filter(s => s.isHealthy).length,
+        localSessions: localSessions.length,
+        remoteSessions: remoteSessions.length,
+      },
+      sessions: {
+        local: localSessions,
+        remote: remoteSessions,
+      },
+      configuration: {
+        sessionTimeoutMinutes: this.sessionTimeout / (60 * 1000),
+        maxRetries: this.maxRetries,
+        connectionTimeoutMs: this.connectionTimeout,
+      },
+      timestamp: new Date().toISOString(),
+    };
+  }
 }

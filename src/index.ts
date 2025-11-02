@@ -5,6 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
   ErrorCode,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
@@ -40,6 +42,7 @@ function createServer() {
     {
       capabilities: {
         tools: {},
+        resources: {},
       },
     }
   );
@@ -172,6 +175,86 @@ function createServer() {
         ErrorCode.InternalError,
         error instanceof Error ? error.message : String(error)
       );
+    }
+  });
+
+  // Resource handlers
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    return {
+      resources: [
+        {
+          uri: "terminal://sessions/status",
+          name: "Terminal Sessions Status",
+          description: "Current status of active terminal sessions including working directories, environment variables, and connection health",
+          mimeType: "application/json",
+        },
+        {
+          uri: "terminal://system/info",
+          name: "System Information",
+          description: "Basic system information including OS, architecture, and available shell environments",
+          mimeType: "application/json",
+        },
+      ],
+    };
+  });
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const { uri } = request.params;
+
+    switch (uri) {
+      case "terminal://sessions/status":
+        try {
+          const sessionStatus = await commandExecutor.getSessionStatus();
+          return {
+            contents: [
+              {
+                uri,
+                mimeType: "application/json",
+                text: JSON.stringify(sessionStatus, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          throw new McpError(
+            ErrorCode.InternalError,
+            `Failed to retrieve session status: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+
+      case "terminal://system/info":
+        try {
+          const systemInfo = {
+            platform: process.platform,
+            arch: process.arch,
+            nodeVersion: process.version,
+            uptime: process.uptime(),
+            memory: process.memoryUsage(),
+            cwd: process.cwd(),
+            env: {
+              SHELL: process.env.SHELL,
+              USER: process.env.USER || process.env.USERNAME,
+              HOME: process.env.HOME || process.env.USERPROFILE,
+            },
+            timestamp: new Date().toISOString(),
+          };
+          return {
+            contents: [
+              {
+                uri,
+                mimeType: "application/json",
+                text: JSON.stringify(systemInfo, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          throw new McpError(
+            ErrorCode.InternalError,
+            `Failed to retrieve system information: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+
+      default:
+        throw new McpError(ErrorCode.InvalidRequest, `Unknown resource: ${uri}`);
     }
   });
 
