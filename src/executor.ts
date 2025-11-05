@@ -839,4 +839,205 @@ export class CommandExecutor {
       timestamp: new Date().toISOString(),
     };
   }
+
+  // Tmux-related methods
+  async getTmuxSessions(options: {
+    host?: string;
+    username?: string;
+    session?: string;
+  } = {}): Promise<any> {
+    try {
+      const result = await this.executeCommand('tmux list-sessions 2>/dev/null || echo "No tmux sessions"', options);
+      const lines = result.stdout.trim().split('\n').filter(line => line && line !== 'No tmux sessions');
+
+      const sessions = lines.map(line => {
+        // Parse tmux session format: "session_name: windows (created date) [flags]"
+        const match = line.match(/^([^:]+):\s*(\d+)\s*windows\s*\(([^)]+)\)\s*(.*)?$/);
+        if (match) {
+          return {
+            name: match[1],
+            windows: parseInt(match[2], 10),
+            created: match[3],
+            flags: match[4] ? match[4].trim() : '',
+            attached: match[4] && match[4].includes('(attached)'),
+          };
+        }
+        return { raw: line };
+      });
+
+      return {
+        sessions,
+        count: sessions.length,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        sessions: [],
+        count: 0,
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  async getTmuxWindows(sessionName: string, options: {
+    host?: string;
+    username?: string;
+    session?: string;
+  } = {}): Promise<any> {
+    try {
+      const result = await this.executeCommand(`tmux list-windows -t "${sessionName}" 2>/dev/null || echo "Session not found"`, options);
+
+      if (result.stdout.includes('Session not found') || result.stdout.trim() === '') {
+        return {
+          session: sessionName,
+          windows: [],
+          count: 0,
+          error: 'Session not found or no windows',
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      const lines = result.stdout.trim().split('\n').filter(line => line);
+      const windows = lines.map(line => {
+        // Parse tmux window format: "index: name flags"
+        const match = line.match(/^(\d+):\s*([^[*+-]*)\s*([*+-]*)$/);
+        if (match) {
+          return {
+            index: parseInt(match[1], 10),
+            name: match[2].trim(),
+            flags: match[3] || '',
+            active: match[3] && match[3].includes('*'),
+            last: match[3] && match[3].includes('-'),
+            zoomed: match[3] && match[3].includes('+'),
+          };
+        }
+        return { raw: line };
+      });
+
+      return {
+        session: sessionName,
+        windows,
+        count: windows.length,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        session: sessionName,
+        windows: [],
+        count: 0,
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  async getTmuxPanes(sessionName: string, windowIndex?: number, options: {
+    host?: string;
+    username?: string;
+    session?: string;
+  } = {}): Promise<any> {
+    try {
+      const target = windowIndex !== undefined ? `${sessionName}:${windowIndex}` : sessionName;
+      const result = await this.executeCommand(`tmux list-panes -t "${target}" 2>/dev/null || echo "Window not found"`, options);
+
+      if (result.stdout.includes('Window not found') || result.stdout.trim() === '') {
+        return {
+          session: sessionName,
+          window: windowIndex,
+          panes: [],
+          count: 0,
+          error: 'Window not found or no panes',
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      const lines = result.stdout.trim().split('\n').filter(line => line);
+      const panes = lines.map(line => {
+        // Parse tmux pane format: "index: [history] size flags"
+        const match = line.match(/^(\d+):\s*\[(\d+x\d+)\]\s*\[history\s+(\d+)\]\s*(.*)$/);
+        if (match) {
+          return {
+            index: parseInt(match[1], 10),
+            size: match[2],
+            history: parseInt(match[3], 10),
+            flags: match[4] || '',
+            active: match[4] && match[4].includes('(active)'),
+          };
+        }
+        return { raw: line };
+      });
+
+      return {
+        session: sessionName,
+        window: windowIndex,
+        panes,
+        count: panes.length,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        session: sessionName,
+        window: windowIndex,
+        panes: [],
+        count: 0,
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  async getTmuxInfo(options: {
+    host?: string;
+    username?: string;
+    session?: string;
+  } = {}): Promise<any> {
+    try {
+      // Check if tmux is available
+      const tmuxCheck = await this.executeCommand('which tmux && tmux -V 2>/dev/null || echo "tmux not found"', options);
+
+      let tmuxAvailable = false;
+      let version = null;
+
+      if (!tmuxCheck.stdout.includes('tmux not found') && tmuxCheck.stdout.trim()) {
+        tmuxAvailable = true;
+        const versionMatch = tmuxCheck.stdout.match(/tmux\s+(\d+\.\d+)/);
+        if (versionMatch) {
+          version = versionMatch[1];
+        }
+      }
+
+      // Get tmux server info if available
+      let serverInfo = null;
+      if (tmuxAvailable) {
+        try {
+          const serverResult = await this.executeCommand('tmux display-message -p "#{version},#{server_sessions},#{server_windows},#{server_panes}" 2>/dev/null || echo "no server"', options);
+          if (!serverResult.stdout.includes('no server')) {
+            const parts = serverResult.stdout.trim().split(',');
+            serverInfo = {
+              version: parts[0],
+              sessions: parseInt(parts[1], 10) || 0,
+              windows: parseInt(parts[2], 10) || 0,
+              panes: parseInt(parts[3], 10) || 0,
+            };
+          }
+        } catch (e) {
+          // Server info not available
+        }
+      }
+
+      return {
+        available: tmuxAvailable,
+        version: version,
+        serverInfo: serverInfo,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        available: false,
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
 }

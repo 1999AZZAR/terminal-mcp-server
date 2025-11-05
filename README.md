@@ -23,7 +23,7 @@ Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for
 
 ## Available Resources
 
-Terminal MCP Server provides **2 key resources** that enhance reliability and performance by providing system visibility and session management capabilities:
+Terminal MCP Server provides **7 key resources** that enhance reliability and performance by providing system visibility, session management, and terminal multiplexing capabilities:
 
 ### `terminal://sessions/status`
 Returns comprehensive information about active terminal sessions, including connection health, working directories, environment variables, and session timeouts.
@@ -114,6 +114,140 @@ Provides basic system information to help with command execution planning and tr
     "USER": "user",
     "HOME": "/home/user"
   },
+  "timestamp": "2025-11-02T17:09:14.866Z"
+
+}
+```
+
+### `terminal://tmux/info`
+Returns information about tmux availability, version, and server statistics including active sessions, windows, and panes.
+
+**Resource Details:**
+- **Purpose**: Check tmux installation and server status
+- **Benefits**: Enables tmux-aware terminal management and multiplexing capabilities
+- **Performance Impact**: Minimal - quick version and server status checks
+- **Reliability**: Helps determine tmux availability before using tmux features
+
+**Response Format:**
+```json
+{
+  "available": true,
+  "version": "3.5a",
+  "serverInfo": {
+    "version": "next-3.5",
+    "sessions": 2,
+    "windows": 4,
+    "panes": 8
+  },
+  "timestamp": "2025-11-02T17:09:14.866Z"
+}
+```
+
+### `terminal://tmux/sessions`
+Lists all active tmux sessions with window counts, creation dates, and attachment status.
+
+**Resource Details:**
+- **Purpose**: Monitor and manage tmux sessions
+- **Benefits**: Provides overview of all tmux sessions and their status
+- **Performance Impact**: Low - uses tmux list-sessions command
+- **Reliability**: Shows real-time session information with creation timestamps
+
+**Response Format:**
+```json
+{
+  "sessions": [
+    {
+      "name": "development",
+      "windows": 3,
+      "created": "Sun Nov  3 10:30:45 2025",
+      "flags": "",
+      "attached": true
+    }
+  ],
+  "count": 1,
+  "timestamp": "2025-11-02T17:09:14.866Z"
+}
+```
+
+### `terminal://tmux/windows/{session}`
+Lists all windows within a specific tmux session with activity indicators and layout information.
+
+**Resource Details:**
+- **Purpose**: Monitor windows within a specific tmux session
+- **Benefits**: Enables window management and navigation within sessions
+- **Performance Impact**: Low - uses tmux list-windows command
+- **Reliability**: Shows window activity status and layout flags
+
+**Response Format:**
+```json
+{
+  "session": "development",
+  "windows": [
+    {
+      "index": 0,
+      "name": "editor",
+      "flags": "*",
+      "active": true,
+      "last": false,
+      "zoomed": false
+    }
+  ],
+  "count": 1,
+  "timestamp": "2025-11-02T17:09:14.866Z"
+}
+```
+
+### `terminal://tmux/panes/{session}`
+Lists all panes within a tmux session or specific window with size, history, and activity status.
+
+**Resource Details:**
+- **Purpose**: Monitor pane layout and status within sessions
+- **Benefits**: Enables pane management and multi-tasking visibility
+- **Performance Impact**: Low - uses tmux list-panes command
+- **Reliability**: Shows pane dimensions, scrollback history, and activity
+
+**Response Format:**
+```json
+{
+  "session": "development",
+  "panes": [
+    {
+      "index": 0,
+      "size": "120x30",
+      "history": 2000,
+      "flags": "(active)",
+      "active": true
+    }
+  ],
+  "count": 1,
+  "timestamp": "2025-11-02T17:09:14.866Z"
+}
+```
+
+### `terminal://tmux/panes/{session}/{window}`
+Lists panes within a specific tmux window with detailed pane information.
+
+**Resource Details:**
+- **Purpose**: Monitor panes within a specific window
+- **Benefits**: Enables focused pane management within windows
+- **Performance Impact**: Low - uses tmux list-panes with target specification
+- **Reliability**: Provides window-specific pane information
+
+**Response Format:**
+```json
+{
+  "session": "development",
+  "window": 0,
+  "panes": [
+    {
+      "index": 0,
+      "size": "120x30",
+      "history": 2000,
+      "flags": "(active)",
+      "active": true
+    }
+  ],
+  "count": 1,
   "timestamp": "2025-11-02T17:09:14.866Z"
 }
 ```

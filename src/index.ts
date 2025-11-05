@@ -194,6 +194,36 @@ function createServer() {
           description: "Basic system information including OS, architecture, and available shell environments",
           mimeType: "application/json",
         },
+        {
+          uri: "terminal://tmux/info",
+          name: "Tmux Information",
+          description: "Tmux availability, version, and server statistics including active sessions, windows, and panes",
+          mimeType: "application/json",
+        },
+        {
+          uri: "terminal://tmux/sessions",
+          name: "Tmux Sessions",
+          description: "List of all active tmux sessions with window counts, creation dates, and attachment status",
+          mimeType: "application/json",
+        },
+        {
+          uri: "terminal://tmux/windows/{session}",
+          name: "Tmux Windows",
+          description: "List of windows within a specific tmux session with activity indicators and layout information",
+          mimeType: "application/json",
+        },
+        {
+          uri: "terminal://tmux/panes/{session}",
+          name: "Tmux Panes",
+          description: "List of panes within a tmux session or specific window with size, history, and activity status",
+          mimeType: "application/json",
+        },
+        {
+          uri: "terminal://tmux/panes/{session}/{window}",
+          name: "Tmux Panes in Window",
+          description: "List of panes within a specific tmux window with detailed pane information",
+          mimeType: "application/json",
+        },
       ],
     };
   });
@@ -253,7 +283,99 @@ function createServer() {
           );
         }
 
+      case "terminal://tmux/info":
+        try {
+          const tmuxInfo = await commandExecutor.getTmuxInfo();
+          return {
+            contents: [
+              {
+                uri,
+                mimeType: "application/json",
+                text: JSON.stringify(tmuxInfo, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          throw new McpError(
+            ErrorCode.InternalError,
+            `Failed to retrieve tmux information: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+
+      case "terminal://tmux/sessions":
+        try {
+          const tmuxSessions = await commandExecutor.getTmuxSessions();
+          return {
+            contents: [
+              {
+                uri,
+                mimeType: "application/json",
+                text: JSON.stringify(tmuxSessions, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          throw new McpError(
+            ErrorCode.InternalError,
+            `Failed to retrieve tmux sessions: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+
       default:
+        // Handle parameterized tmux resources
+        if (uri.startsWith("terminal://tmux/windows/")) {
+          const sessionName = uri.replace("terminal://tmux/windows/", "");
+          if (!sessionName) {
+            throw new McpError(ErrorCode.InvalidRequest, "Session name is required for tmux windows resource");
+          }
+
+          try {
+            const tmuxWindows = await commandExecutor.getTmuxWindows(sessionName);
+            return {
+              contents: [
+                {
+                  uri,
+                  mimeType: "application/json",
+                  text: JSON.stringify(tmuxWindows, null, 2),
+                },
+              ],
+            };
+          } catch (error) {
+            throw new McpError(
+              ErrorCode.InternalError,
+              `Failed to retrieve tmux windows for session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        }
+
+        if (uri.startsWith("terminal://tmux/panes/")) {
+          const pathParts = uri.replace("terminal://tmux/panes/", "").split("/");
+          const sessionName = pathParts[0];
+          const windowIndex = pathParts[1] ? parseInt(pathParts[1], 10) : undefined;
+
+          if (!sessionName) {
+            throw new McpError(ErrorCode.InvalidRequest, "Session name is required for tmux panes resource");
+          }
+
+          try {
+            const tmuxPanes = await commandExecutor.getTmuxPanes(sessionName, windowIndex);
+            return {
+              contents: [
+                {
+                  uri,
+                  mimeType: "application/json",
+                  text: JSON.stringify(tmuxPanes, null, 2),
+                },
+              ],
+            };
+          } catch (error) {
+            throw new McpError(
+              ErrorCode.InternalError,
+              `Failed to retrieve tmux panes for session '${sessionName}'${windowIndex !== undefined ? ` window ${windowIndex}` : ''}: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        }
+
         throw new McpError(ErrorCode.InvalidRequest, `Unknown resource: ${uri}`);
     }
   });
