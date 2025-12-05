@@ -10,29 +10,17 @@ import {
   ErrorCode,
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
-import { CommandExecutor } from "./executor.js";
-
-// 全局日志函数，确保所有日志都通过stderr输出
-export const log = {
-  debug: (message: string, ...args: any[]) => {
-    if (process.env.DEBUG === 'true') {
-      console.error(`[DEBUG] ${message}`, ...args);
-    }
-  },
-  info: (message: string, ...args: any[]) => {
-    console.error(`[INFO] ${message}`, ...args);
-  },
-  warn: (message: string, ...args: any[]) => {
-    console.error(`[WARN] ${message}`, ...args);
-  },
-  error: (message: string, ...args: any[]) => {
-    console.error(`[ERROR] ${message}`, ...args);
-  }
-};
+import { 
+  CommandExecutor, 
+  CommandExecutionError, 
+  TimeoutError, 
+  SshConnectionError 
+} from "./executor.js";
+import { log } from "./logger.js";
 
 const commandExecutor = new CommandExecutor();
 
-// 创建服务器
+// Create server
 function createServer() {
   const server = new Server(
     {
@@ -52,7 +40,7 @@ function createServer() {
       tools: [
         {
           name: "execute_command",
-          description: "Execute commands on remote hosts or locally with enhanced error handling, session management, and working directory support",
+          description: "Execute commands on remote hosts or locally. Returns a JSON object with 'command', 'exitCode', 'stdout', and 'stderr'.",
           inputSchema: {
             type: "object",
             properties: {
@@ -66,21 +54,21 @@ function createServer() {
               },
               session: {
                 type: "string",
-                description: "Session name, defaults to 'default'. The same session name will reuse the same terminal environment for 20 minutes, which is useful for operations requiring specific environments like conda.",
+                description: "Session name, defaults to 'default'. Reuse to persist state.",
                 default: "default"
               },
               command: {
                 type: "string",
-                description: "Command to execute. Before running commands, it's best to determine the system type (Mac, Linux, etc.)"
+                description: "Command to execute."
               },
               env: {
                 type: "object",
-                description: "Environment variables to set for the command execution",
+                description: "Environment variables to set.",
                 default: {}
               },
               workingDirectory: {
                 type: "string",
-                description: "Working directory for command execution (optional)"
+                description: "Working directory for command execution."
               },
               timeout: {
                 type: "number",
@@ -133,37 +121,52 @@ function createServer() {
           timeout
         });
         
-        // Format output with exit code information
-        let outputText = `Command: ${command}\n`;
-        if (workingDirectory) {
-          outputText += `Working Directory: ${workingDirectory}\n`;
-        }
-        outputText += `Exit Code: ${result.exitCode || 0}\n\n`;
-        outputText += `STDOUT:\n${result.stdout}\n\n`;
-        if (result.stderr) {
-          outputText += `STDERR:\n${result.stderr}\n`;
-        }
+        // Strict JSON response format
+        const response = {
+          command,
+          exitCode: result.exitCode || 0,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          workingDirectory: workingDirectory || (host ? undefined : process.cwd())
+        };
         
         return {
           content: [{
             type: "text",
-            text: outputText
+            text: JSON.stringify(response, null, 2)
           }]
         };
       } catch (error) {
-        if (error instanceof Error) {
-          let errorMessage = error.message;
-          
-          // Provide more specific error messages
-          if (error.message.includes('SSH')) {
-            errorMessage = `SSH connection error: ${error.message}. Please ensure SSH key-based authentication is set up.`;
-          } else if (error.message.includes('timeout')) {
-            errorMessage = `Command execution timed out after ${timeout}ms. The command may still be running on the remote host.`;
-          } else if (error.message.includes('ENOENT')) {
-            errorMessage = `SSH key not found. Please ensure SSH key-based authentication is set up at ~/.ssh/id_rsa.`;
+        if (error instanceof CommandExecutionError) {
+          // Even if there is an error (like non-zero exit code if caught by exec), return structured data if available
+          if (error.stdout || error.stderr) {
+             const response = {
+              command,
+              exitCode: error.exitCode || 1,
+              stdout: error.stdout || "",
+              stderr: error.stderr || error.message,
+              error: error.message
+            };
+            return {
+               content: [{
+                type: "text",
+                text: JSON.stringify(response, null, 2)
+              }]
+            };
           }
-          
-          throw new McpError(ErrorCode.InternalError, errorMessage);
+           throw new McpError(ErrorCode.InternalError, `Command failed: ${error.message}`);
+        }
+        
+        if (error instanceof TimeoutError) {
+           throw new McpError(ErrorCode.InternalError, `Timeout: ${error.message}`);
+        }
+        
+        if (error instanceof SshConnectionError) {
+           throw new McpError(ErrorCode.InternalError, `SSH Error: ${error.message}`);
+        }
+
+        if (error instanceof Error) {
+          throw new McpError(ErrorCode.InternalError, error.message);
         }
         throw error;
       }
@@ -385,10 +388,10 @@ function createServer() {
 
 async function main() {
   try {
-    // 使用标准输入输出
+    // Standard I/O setup
     const server = createServer();
     
-    // 设置MCP错误处理程序
+    // MCP Error handling
     server.onerror = (error) => {
       log.error(`MCP Error: ${error.message}`);
     };

@@ -3,7 +3,29 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { exec } from 'child_process';
-import { log } from './index.js';
+import { log } from './logger.js';
+
+// Custom Error Classes
+export class CommandExecutionError extends Error {
+  constructor(message: string, public exitCode?: number, public stdout?: string, public stderr?: string) {
+    super(message);
+    this.name = 'CommandExecutionError';
+  }
+}
+
+export class TimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TimeoutError';
+  }
+}
+
+export class SshConnectionError extends Error {
+  constructor(message: string, public originalError?: any) {
+    super(message);
+    this.name = 'SshConnectionError';
+  }
+}
 
 export class CommandExecutor {
   private sessions: Map<string, {
@@ -108,16 +130,14 @@ export class CommandExecutor {
         await this.establishConnection(host, username, sessionName);
         log.info(`Successfully connected to ${host}`);
         return;
-      } catch (error) {
+      } catch (error: any) {
         retryCount++;
         const isLastAttempt = retryCount >= maxRetries;
         
-        if (error instanceof Error) {
-          log.error(`Connection attempt ${retryCount} failed: ${error.message}`);
+        log.error(`Connection attempt ${retryCount} failed: ${error.message}`);
           
-          if (isLastAttempt) {
-            throw new Error(`Failed to connect to ${host} after ${maxRetries} attempts. Last error: ${error.message}`);
-          }
+        if (isLastAttempt) {
+          throw new SshConnectionError(`Failed to connect to ${host} after ${maxRetries} attempts. Last error: ${error.message}`, error);
         }
         
         if (!isLastAttempt) {
@@ -133,11 +153,11 @@ export class CommandExecutor {
     const sessionKey = this.getSessionKey(host, sessionName);
     
     try {
-      const privateKeyPath = path.join(os.homedir(), '.ssh', 'id_rsa');
+      const privateKeyPath = process.env.SSH_KEY_PATH || path.join(os.homedir(), '.ssh', 'id_rsa');
       
       // Check if SSH key exists
       if (!fs.existsSync(privateKeyPath)) {
-        throw new Error(`SSH key not found at ${privateKeyPath}. Please ensure SSH key-based authentication is set up.`);
+        throw new SshConnectionError(`SSH key not found at ${privateKeyPath}. Please ensure SSH key-based authentication is set up or set SSH_KEY_PATH environment variable.`);
       }
       
       const privateKey = fs.readFileSync(privateKeyPath);
@@ -145,7 +165,7 @@ export class CommandExecutor {
       const client = new Client();
       const connection = new Promise<void>((resolve, reject) => {
         const connectionTimer = setTimeout(() => {
-          reject(new Error(`Connection timeout after ${this.connectionTimeout}ms`));
+          reject(new TimeoutError(`Connection timeout after ${this.connectionTimeout}ms`));
           client.destroy();
         }, this.connectionTimeout);
 
@@ -159,7 +179,7 @@ export class CommandExecutor {
             client.shell({ term: 'xterm-256color' }, (err, stream) => {
               if (err) {
                 log.error(`Failed to create interactive shell: ${err.message}`);
-                reject(new Error(`Failed to create shell: ${err.message}`));
+                reject(new SshConnectionError(`Failed to create shell: ${err.message}`));
                 return;
               }
               
@@ -216,7 +236,7 @@ export class CommandExecutor {
               errorMessage = `Authentication failed for user ${username} on ${host}. Check SSH key permissions and user credentials.`;
             }
             
-            reject(new Error(errorMessage));
+            reject(new SshConnectionError(errorMessage, err));
           })
           .connect({
             host: host,
@@ -246,9 +266,9 @@ export class CommandExecutor {
       });
 
       return connection;
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof Error && error.message.includes('ENOENT')) {
-        throw new Error(`SSH key file does not exist at ${path.join(os.homedir(), '.ssh', 'id_rsa')}. Please ensure SSH key-based authentication is set up.`);
+        throw new SshConnectionError(`SSH key file does not exist. Please ensure SSH key-based authentication is set up.`);
       }
       throw error;
     }
@@ -265,14 +285,6 @@ export class CommandExecutor {
 
   /**
    * Safely removes matching quotes from the beginning and end of a string.
-   * Only removes quotes if they form a proper matching pair at the very beginning and end.
-   * Examples:
-   * - "hello" -> hello
-   * - 'world' -> world
-   * - "foo' -> "foo' (unchanged, unmatched quotes)
-   * - hello" -> hello" (unchanged, unmatched quotes)
-   * - "hello"world" -> "hello"world" (unchanged, quotes not at very beginning/end)
-   * - "hello world" -> hello world
    */
   private removeMatchingQuotes(value: string): string {
     if (value.length < 2) {
@@ -282,10 +294,7 @@ export class CommandExecutor {
     const firstChar = value[0];
     const lastChar = value[value.length - 1];
 
-    // Only remove quotes if they match and are at the very beginning and end
-    // This ensures we don't accidentally remove quotes from strings like "hello"world"
     if ((firstChar === '"' && lastChar === '"') || (firstChar === "'" && lastChar === "'")) {
-      // Double-check that there are no quotes of the same type in between
       const quoteType = firstChar;
       const middle = value.slice(1, -1);
       if (!middle.includes(quoteType)) {
@@ -335,13 +344,13 @@ export class CommandExecutor {
 
     // Validate input
     if (!command || command.trim().length === 0) {
-      throw new Error('Command cannot be empty');
+      throw new CommandExecutionError('Command cannot be empty');
     }
 
     // If host is specified, use SSH execution
     if (host) {
       if (!username) {
-        throw new Error('Username is required when using SSH');
+        throw new CommandExecutionError('Username is required when using SSH');
       }
       
       try {
@@ -350,7 +359,7 @@ export class CommandExecutor {
         const sessionData = this.sessions.get(sessionKey);
         
         if (!sessionData || !sessionData.client) {
-          throw new Error(`Failed to establish SSH connection to ${host}`);
+          throw new SshConnectionError(`Failed to establish SSH connection to ${host}`);
         }
         
         this.updateActivity(sessionKey);
@@ -368,8 +377,8 @@ export class CommandExecutor {
           log.info(`Executing command using exec: ${command}`);
           return await this.executeWithExec(sessionKey, command, env, timeout);
         }
-      } catch (error) {
-        log.error(`Command execution failed: ${error instanceof Error ? error.message : String(error)}`);
+      } catch (error: any) {
+        log.error(`Command execution failed: ${error.message}`);
         throw error;
       }
     } 
@@ -425,7 +434,7 @@ export class CommandExecutor {
         if (!commandFinished) {
           sessionData.shell.removeListener('data', dataHandler);
           sessionData.shell.removeListener('error', errorHandler);
-          reject(new Error(`Working directory change timed out`));
+          reject(new TimeoutError(`Working directory change timed out`));
         }
       }, 5000);
     });
@@ -439,7 +448,7 @@ export class CommandExecutor {
   ): Promise<{stdout: string; stderr: string; exitCode?: number}> {
     const sessionData = this.sessions.get(sessionKey);
     if (!sessionData || !sessionData.shell) {
-      throw new Error('Shell session not available');
+      throw new CommandExecutionError('Shell session not available');
     }
 
     return new Promise((resolve, reject) => {
@@ -507,7 +516,7 @@ export class CommandExecutor {
         sessionData.shell.removeListener('data', dataHandler);
         sessionData.shell.removeListener('error', errorHandler);
         clearTimeout(timeoutId);
-        reject(err);
+        reject(new CommandExecutionError(err.message, undefined, stdout, stderr));
       };
       
       sessionData.shell.on('data', dataHandler);
@@ -536,7 +545,7 @@ export class CommandExecutor {
   ): Promise<{stdout: string; stderr: string; exitCode?: number}> {
     const sessionData = this.sessions.get(sessionKey);
     if (!sessionData || !sessionData.client) {
-      throw new Error('SSH client not available');
+      throw new CommandExecutionError('SSH client not available');
     }
 
     return new Promise((resolve, reject) => {
@@ -549,13 +558,13 @@ export class CommandExecutor {
       const fullCommand = envSetup ? `${envSetup} && ${command}` : command;
       
       if (!sessionData.client) {
-        reject(new Error('SSH client not available'));
+        reject(new CommandExecutionError('SSH client not available'));
         return;
       }
 
       sessionData.client.exec(`/bin/bash --login -c "${fullCommand.replace(/"/g, '\\"')}"`, (err, stream) => {
         if (err) {
-          reject(err);
+          reject(new CommandExecutionError(err.message));
           return;
         }
 
@@ -576,7 +585,7 @@ export class CommandExecutor {
             resolve({ stdout, stderr, exitCode });
           })
           .on('error', (err) => {
-            reject(err);
+            reject(new CommandExecutionError(err.message, undefined, stdout, stderr));
           });
 
         // Set timeout for the entire operation
@@ -630,7 +639,6 @@ export class CommandExecutor {
     this.resetTimeout(sessionKey);
     
     // Check if command is trying to set environment variables
-    // Only handle standalone export commands (not chained with other commands)
     const exportMatch = command.match(/^\s*export\s+([^=;|&]+)=([^;|&]*)(?:\s*$|\s*;|\s*&&|\s*\|\|)/);
     if (exportMatch) {
       const [, varName, varValue] = exportMatch;
@@ -639,17 +647,10 @@ export class CommandExecutor {
       const hasChainedCommands = /^\s*export\s+[^=;|&]+=[^;|&]*\s*[;|&]/.test(command);
       
       if (hasChainedCommands) {
-        // If there are chained commands, don't intercept - let the shell handle it
         log.info(`Export command with chained commands detected, executing normally: ${command}`);
       } else {
-        // Only handle standalone export commands
         const cleanValue = this.removeMatchingQuotes(varValue.trim());
-        
-        // Ensure env object exists
-        if (!sessionData.env) {
-          sessionData.env = {};
-        }
-        
+        if (!sessionData.env) sessionData.env = {};
         sessionData.env[varName.trim()] = cleanValue;
         this.sessions.set(sessionKey, sessionData);
         log.info(`Set environment variable ${varName.trim()}=${cleanValue} in session ${sessionKey}`);
@@ -663,19 +664,21 @@ export class CommandExecutor {
     }
     
     return new Promise((resolve, reject) => {
-      // Build environment variables
       const envVars = { ...process.env, ...sessionData.env };
       
-      // Execute command
       log.info(`Executing local command: ${command}`);
       const childProcess = exec(command, { 
         env: envVars,
         cwd: sessionData.workingDirectory,
         timeout: timeout
       }, (error, stdout, stderr) => {
-        const exitCode = error ? (error.code || 1) : 0;
+        let exitCode = 0;
+        if (error) {
+           exitCode = typeof error.code === 'number' ? error.code : 1;
+        }
         
-        if (error && (error as any).code === 'TIMEOUT') {
+        // Check for timeout: error.killed is true if process was killed by signal
+        if (error && (error.killed || (error as any).code === 'ETIMEDOUT')) {
           resolve({ 
             stdout, 
             stderr: stderr + `\nCommand timed out after ${timeout}ms`, 
@@ -686,9 +689,8 @@ export class CommandExecutor {
         }
       });
 
-      // Handle process termination
       childProcess.on('error', (error) => {
-        reject(new Error(`Process error: ${error.message}`));
+        reject(new CommandExecutionError(`Process error: ${error.message}`));
       });
     });
   }
@@ -702,95 +704,43 @@ export class CommandExecutor {
     try {
       log.info(`Disconnecting session: ${sessionKey}`);
       
-      // Close shell first
       if (session.shell) {
-        log.info(`Closing interactive shell for session ${sessionKey}`);
         try {
           session.shell.end();
           session.shellReady = false;
         } catch (error) {
-          log.warn(`Error closing shell for session ${sessionKey}: ${error}`);
+          log.warn(`Error closing shell: ${error}`);
         }
       }
       
-      // Close SSH client
       if (session.client) {
-        log.info(`Disconnecting SSH connection for session ${sessionKey}`);
         try {
           session.client.end();
         } catch (error) {
-          log.warn(`Error closing SSH client for session ${sessionKey}: ${error}`);
+          log.warn(`Error closing SSH client: ${error}`);
         }
       }
       
-      // Clear timeout
       if (session.timeout) {
         clearTimeout(session.timeout);
       }
       
-      // Remove session
       this.sessions.delete(sessionKey);
       log.info(`Successfully disconnected session: ${sessionKey}`);
     } catch (error) {
       log.error(`Error during session disconnection ${sessionKey}: ${error}`);
-      // Force remove session even if cleanup failed
       this.sessions.delete(sessionKey);
     }
   }
 
   async disconnect(): Promise<void> {
     log.info(`Disconnecting all sessions...`);
-    
     const sessionKeys = Array.from(this.sessions.keys());
-    if (sessionKeys.length === 0) {
-      log.info(`No active sessions to disconnect`);
-      return;
-    }
+    if (sessionKeys.length === 0) return;
 
-    const disconnectPromises = sessionKeys.map(
-      sessionKey => this.disconnectSession(sessionKey)
-    );
-    
-    try {
-      await Promise.allSettled(disconnectPromises);
-      log.info(`All sessions disconnected`);
-    } catch (error) {
-      log.error(`Error during bulk disconnection: ${error}`);
-    } finally {
-      this.sessions.clear();
-    }
-  }
-
-  // Add method to get session information for debugging
-  getSessionInfo(): Array<{
-    sessionKey: string;
-    host?: string;
-    username?: string;
-    workingDirectory?: string;
-    lastActivity?: number;
-    shellReady: boolean;
-  }> {
-    return Array.from(this.sessions.entries()).map(([sessionKey, session]) => ({
-      sessionKey,
-      host: session.host,
-      username: session.username,
-      workingDirectory: session.workingDirectory,
-      lastActivity: session.lastActivity,
-      shellReady: session.shellReady || false
-    }));
-  }
-
-  // Add method to cleanup inactive sessions
-  cleanupInactiveSessions(): void {
-    const now = Date.now();
-    const inactiveThreshold = 5 * 60 * 1000; // 5 minutes
-    
-    for (const [sessionKey, session] of this.sessions.entries()) {
-      if (session.lastActivity && (now - session.lastActivity) > inactiveThreshold) {
-        log.info(`Cleaning up inactive session: ${sessionKey}`);
-        this.disconnectSession(sessionKey);
-      }
-    }
+    await Promise.allSettled(sessionKeys.map(k => this.disconnectSession(k)));
+    this.sessions.clear();
+    log.info(`All sessions disconnected`);
   }
 
   async getSessionStatus(): Promise<any> {
@@ -798,7 +748,6 @@ export class CommandExecutor {
       const isActive = session.client && session.connection;
       const isHealthy = isActive ? await this.isConnectionHealthy(session.client!) : false;
       const lastActivity = session.lastActivity ? new Date(session.lastActivity).toISOString() : null;
-      const timeUntilExpiry = session.timeout ? (session.timeout as any)._idleTimeout : null;
 
       return {
         sessionKey,
@@ -809,10 +758,7 @@ export class CommandExecutor {
         workingDirectory: session.workingDirectory,
         environmentVariables: session.env ? Object.keys(session.env) : [],
         lastActivity,
-        timeUntilExpiry,
         shellReady: session.shellReady || false,
-        retryCount: session.retryCount || 0,
-        maxRetries: session.maxRetries || this.maxRetries,
       };
     }));
 
@@ -823,7 +769,6 @@ export class CommandExecutor {
       summary: {
         totalSessions: sessions.length,
         activeSessions: sessions.filter(s => s.isActive).length,
-        healthySessions: sessions.filter(s => s.isHealthy).length,
         localSessions: localSessions.length,
         remoteSessions: remoteSessions.length,
       },
@@ -831,35 +776,28 @@ export class CommandExecutor {
         local: localSessions,
         remote: remoteSessions,
       },
-      configuration: {
-        sessionTimeoutMinutes: this.sessionTimeout / (60 * 1000),
-        maxRetries: this.maxRetries,
-        connectionTimeoutMs: this.connectionTimeout,
-      },
       timestamp: new Date().toISOString(),
     };
   }
 
   // Tmux-related methods
-  async getTmuxSessions(options: {
-    host?: string;
-    username?: string;
-    session?: string;
-  } = {}): Promise<any> {
+  async getTmuxSessions(options: { host?: string; username?: string; session?: string } = {}): Promise<any> {
     try {
-      const result = await this.executeCommand('tmux list-sessions 2>/dev/null || echo "No tmux sessions"', options);
+      // Use -F for machine readable output
+      // Format: session_name,windows_count,created_time,flags,attached
+      const cmd = `tmux list-sessions -F "#{session_name},#{session_windows},#{session_created},#{session_flags},#{?session_attached,attached,detached}" 2>/dev/null || echo "No tmux sessions"`;
+      const result = await this.executeCommand(cmd, options);
       const lines = result.stdout.trim().split('\n').filter(line => line && line !== 'No tmux sessions');
 
       const sessions = lines.map(line => {
-        // Parse tmux session format: "session_name: windows (created date) [flags]"
-        const match = line.match(/^([^:]+):\s*(\d+)\s*windows\s*\(([^)]+)\)\s*(.*)?$/);
-        if (match) {
+        const parts = line.split(',');
+        if (parts.length >= 5) {
           return {
-            name: match[1],
-            windows: parseInt(match[2], 10),
-            created: match[3],
-            flags: match[4] ? match[4].trim() : '',
-            attached: match[4] && match[4].includes('(attached)'),
+            name: parts[0],
+            windows: parseInt(parts[1], 10),
+            created: new Date(parseInt(parts[2], 10) * 1000).toISOString(),
+            flags: parts[3],
+            attached: parts[4] === 'attached',
           };
         }
         return { raw: line };
@@ -870,23 +808,21 @@ export class CommandExecutor {
         count: sessions.length,
         timestamp: new Date().toISOString(),
       };
-    } catch (error) {
+    } catch (error: any) {
       return {
         sessions: [],
         count: 0,
-        error: error instanceof Error ? error.message : String(error),
+        error: error.message,
         timestamp: new Date().toISOString(),
       };
     }
   }
 
-  async getTmuxWindows(sessionName: string, options: {
-    host?: string;
-    username?: string;
-    session?: string;
-  } = {}): Promise<any> {
+  async getTmuxWindows(sessionName: string, options: { host?: string; username?: string; session?: string } = {}): Promise<any> {
     try {
-      const result = await this.executeCommand(`tmux list-windows -t "${sessionName}" 2>/dev/null || echo "Session not found"`, options);
+      // Format: index,name,flags,active,last,zoomed
+      const cmd = `tmux list-windows -t "${sessionName}" -F "#{window_index},#{window_name},#{window_flags},#{?window_active,true,false},#{?window_last,true,false},#{?window_zoomed_flag,true,false}" 2>/dev/null || echo "Session not found"`;
+      const result = await this.executeCommand(cmd, options);
 
       if (result.stdout.includes('Session not found') || result.stdout.trim() === '') {
         return {
@@ -900,16 +836,15 @@ export class CommandExecutor {
 
       const lines = result.stdout.trim().split('\n').filter(line => line);
       const windows = lines.map(line => {
-        // Parse tmux window format: "index: name flags"
-        const match = line.match(/^(\d+):\s*([^[*+-]*)\s*([*+-]*)$/);
-        if (match) {
+        const parts = line.split(',');
+        if (parts.length >= 6) {
           return {
-            index: parseInt(match[1], 10),
-            name: match[2].trim(),
-            flags: match[3] || '',
-            active: match[3] && match[3].includes('*'),
-            last: match[3] && match[3].includes('-'),
-            zoomed: match[3] && match[3].includes('+'),
+            index: parseInt(parts[0], 10),
+            name: parts[1],
+            flags: parts[2],
+            active: parts[3] === 'true',
+            last: parts[4] === 'true',
+            zoomed: parts[5] === 'true',
           };
         }
         return { raw: line };
@@ -921,25 +856,23 @@ export class CommandExecutor {
         count: windows.length,
         timestamp: new Date().toISOString(),
       };
-    } catch (error) {
+    } catch (error: any) {
       return {
         session: sessionName,
         windows: [],
         count: 0,
-        error: error instanceof Error ? error.message : String(error),
+        error: error.message,
         timestamp: new Date().toISOString(),
       };
     }
   }
 
-  async getTmuxPanes(sessionName: string, windowIndex?: number, options: {
-    host?: string;
-    username?: string;
-    session?: string;
-  } = {}): Promise<any> {
+  async getTmuxPanes(sessionName: string, windowIndex?: number, options: { host?: string; username?: string; session?: string } = {}): Promise<any> {
     try {
       const target = windowIndex !== undefined ? `${sessionName}:${windowIndex}` : sessionName;
-      const result = await this.executeCommand(`tmux list-panes -t "${target}" 2>/dev/null || echo "Window not found"`, options);
+      // Format: index,width,height,history_size,active
+      const cmd = `tmux list-panes -t "${target}" -F "#{pane_index},#{pane_width},#{pane_height},#{history_size},#{?pane_active,true,false}" 2>/dev/null || echo "Window not found"`;
+      const result = await this.executeCommand(cmd, options);
 
       if (result.stdout.includes('Window not found') || result.stdout.trim() === '') {
         return {
@@ -954,15 +887,13 @@ export class CommandExecutor {
 
       const lines = result.stdout.trim().split('\n').filter(line => line);
       const panes = lines.map(line => {
-        // Parse tmux pane format: "index: [history] size flags"
-        const match = line.match(/^(\d+):\s*\[(\d+x\d+)\]\s*\[history\s+(\d+)\]\s*(.*)$/);
-        if (match) {
+        const parts = line.split(',');
+        if (parts.length >= 5) {
           return {
-            index: parseInt(match[1], 10),
-            size: match[2],
-            history: parseInt(match[3], 10),
-            flags: match[4] || '',
-            active: match[4] && match[4].includes('(active)'),
+            index: parseInt(parts[0], 10),
+            size: `${parts[1]}x${parts[2]}`,
+            history: parseInt(parts[3], 10),
+            active: parts[4] === 'true',
           };
         }
         return { raw: line };
@@ -975,27 +906,21 @@ export class CommandExecutor {
         count: panes.length,
         timestamp: new Date().toISOString(),
       };
-    } catch (error) {
+    } catch (error: any) {
       return {
         session: sessionName,
         window: windowIndex,
         panes: [],
         count: 0,
-        error: error instanceof Error ? error.message : String(error),
+        error: error.message,
         timestamp: new Date().toISOString(),
       };
     }
   }
 
-  async getTmuxInfo(options: {
-    host?: string;
-    username?: string;
-    session?: string;
-  } = {}): Promise<any> {
+  async getTmuxInfo(options: { host?: string; username?: string; session?: string } = {}): Promise<any> {
     try {
-      // Check if tmux is available
       const tmuxCheck = await this.executeCommand('which tmux && tmux -V 2>/dev/null || echo "tmux not found"', options);
-
       let tmuxAvailable = false;
       let version = null;
 
@@ -1007,7 +932,6 @@ export class CommandExecutor {
         }
       }
 
-      // Get tmux server info if available
       let serverInfo = null;
       if (tmuxAvailable) {
         try {
@@ -1032,10 +956,10 @@ export class CommandExecutor {
         serverInfo: serverInfo,
         timestamp: new Date().toISOString(),
       };
-    } catch (error) {
+    } catch (error: any) {
       return {
         available: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: error.message,
         timestamp: new Date().toISOString(),
       };
     }
