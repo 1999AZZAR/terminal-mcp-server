@@ -8,6 +8,37 @@ Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for
 
 > **Note**: This is a maintained fork of the original project with significant robustness improvements and new features.
 
+## Table of Contents
+
+- [Features](#features)
+- [Available Resources](#available-resources)
+- [Installation](#installation)
+  - [Installing via Smithery](#installing-via-smithery)
+  - [Manual Installation](#manual-installation)
+- [Usage](#usage)
+  - [Starting the Server](#starting-the-server)
+  - [Server Configuration](#server-configuration)
+  - [Testing with MCP Inspector](#testing-with-mcp-inspector)
+  - [Available NPM Scripts](#available-npm-scripts)
+- [The execute_command Tool](#the-execute_command-tool)
+  - [Parameters](#parameters)
+  - [Examples](#examples)
+- [Configuring with AI Assistants](#configuring-with-ai-assistants)
+  - [Configuring with Roo Code](#configuring-with-roo-code)
+  - [Configuring with Cline](#configuring-with-cline)
+  - [Configuring with Claude Desktop](#configuring-with-claude-desktop)
+- [Best Practices](#best-practices)
+  - [Command Execution](#command-execution)
+  - [SSH Connection](#ssh-connection)
+  - [Session Management](#session-management)
+  - [Error Handling](#error-handling)
+  - [Working Directory Management](#working-directory-management)
+  - [Timeout Management](#timeout-management)
+- [Output Format](#output-format)
+- [Troubleshooting](#troubleshooting)
+- [Important Notes](#important-notes)
+- [Robustness Features](#robustness-features)
+
 ## Features
 
 - **Local Command Execution**: Execute commands directly on the local machine
@@ -253,14 +284,6 @@ Lists panes within a specific tmux window with detailed pane information.
 ```
 
 ## Installation
-
-### Installing via Smithery
-
-To install terminal-mcp-server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@1999AZZAR/terminal-mcp-server):
-
-```bash
-npx -y @smithery/cli install @1999AZZAR/terminal-mcp-server --client claude
-```
 
 ### Manual Installation
 ```bash
