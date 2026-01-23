@@ -27,6 +27,55 @@ export class SshConnectionError extends Error {
   }
 }
 
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
+
+export class SecurityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SecurityError';
+  }
+}
+
+export class ResourceLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ResourceLimitError';
+  }
+}
+
+// Configuration interface
+export interface ExecutorConfig {
+  sessionTimeout: number;
+  maxRetries: number;
+  connectionTimeout: number;
+  maxConcurrentSessions: number;
+  maxOutputSize: number;
+  enableCommandValidation: boolean;
+  commandBlacklist: string[];
+  allowedWorkingDirectories: string[] | null; // null means all directories allowed
+}
+
+// Default configuration with environment variable overrides
+function getConfig(): ExecutorConfig {
+  return {
+    sessionTimeout: parseInt(process.env.SESSION_TIMEOUT_MS || '1200000', 10), // 20 minutes
+    maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
+    connectionTimeout: parseInt(process.env.CONNECTION_TIMEOUT_MS || '30000', 10),
+    maxConcurrentSessions: parseInt(process.env.MAX_CONCURRENT_SESSIONS || '10', 10),
+    maxOutputSize: parseInt(process.env.MAX_OUTPUT_SIZE || '5242880', 10), // 5MB default
+    enableCommandValidation: process.env.ENABLE_COMMAND_VALIDATION !== 'false',
+    commandBlacklist: (process.env.COMMAND_BLACKLIST || '').split(',').filter(Boolean),
+    allowedWorkingDirectories: process.env.ALLOWED_WORKING_DIRECTORIES 
+      ? process.env.ALLOWED_WORKING_DIRECTORIES.split(',').filter(Boolean)
+      : null,
+  };
+}
+
 export class CommandExecutor {
   private sessions: Map<string, {
     client: Client | null;
@@ -43,17 +92,158 @@ export class CommandExecutor {
     maxRetries?: number;
   }> = new Map();
   
-  private sessionTimeout: number = 20 * 60 * 1000; // 20 minutes
-  private maxRetries: number = 3;
-  private connectionTimeout: number = 30000; // 30 seconds
+  private config: ExecutorConfig;
+  
+  // Dangerous command patterns that could be security risks
+  private static readonly DANGEROUS_PATTERNS: RegExp[] = [
+    /rm\s+(-[rf]+\s+)*\//i,                    // rm with root path
+    /rm\s+(-[rf]+\s+)*~\//i,                   // rm with home directory
+    /mkfs\./i,                                  // filesystem formatting
+    /dd\s+.*of=\/dev\//i,                      // dd to device
+    />\s*\/dev\/sd[a-z]/i,                     // write to disk device
+    /chmod\s+(-R\s+)?777\s+\//i,               // chmod 777 on root
+    /chown\s+(-R\s+)?.*\s+\//i,                // chown on root
+    /:(){ :\|:& };:/,                          // fork bomb
+    /\|\s*mail\s/i,                            // pipe to mail
+    /curl.*\|\s*(ba)?sh/i,                     // curl pipe to shell
+    /wget.*\|\s*(ba)?sh/i,                     // wget pipe to shell
+    /\beval\s+.*\$\(/i,                        // eval with command substitution
+    />\s*\/etc\//i,                            // write to /etc
+    />\s*\/boot\//i,                           // write to /boot
+  ];
 
-  constructor() {}
+  // Session name validation pattern
+  private static readonly SESSION_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+
+  constructor(customConfig?: Partial<ExecutorConfig>) {
+    this.config = { ...getConfig(), ...customConfig };
+    log.info(`CommandExecutor initialized with config: maxSessions=${this.config.maxConcurrentSessions}, maxOutput=${this.config.maxOutputSize}, commandValidation=${this.config.enableCommandValidation}`);
+  }
+
+  /**
+   * Validate session name format
+   */
+  validateSessionName(sessionName: string): void {
+    if (!sessionName || typeof sessionName !== 'string') {
+      throw new ValidationError('Session name is required and must be a string');
+    }
+    if (!CommandExecutor.SESSION_NAME_PATTERN.test(sessionName)) {
+      throw new ValidationError('Session name must be 1-64 characters and contain only alphanumeric characters, underscores, and hyphens');
+    }
+  }
+
+  /**
+   * Validate command for dangerous patterns
+   */
+  validateCommand(command: string): void {
+    if (!this.config.enableCommandValidation) {
+      return;
+    }
+
+    if (!command || typeof command !== 'string') {
+      throw new ValidationError('Command is required and must be a string');
+    }
+
+    const trimmedCommand = command.trim();
+    if (trimmedCommand.length === 0) {
+      throw new ValidationError('Command cannot be empty');
+    }
+
+    if (trimmedCommand.length > 10000) {
+      throw new ValidationError('Command exceeds maximum length of 10000 characters');
+    }
+
+    // Check against blacklisted commands
+    for (const blacklisted of this.config.commandBlacklist) {
+      if (trimmedCommand.toLowerCase().startsWith(blacklisted.toLowerCase())) {
+        throw new SecurityError(`Command '${blacklisted}' is blacklisted`);
+      }
+    }
+
+    // Check for dangerous patterns
+    for (const pattern of CommandExecutor.DANGEROUS_PATTERNS) {
+      if (pattern.test(trimmedCommand)) {
+        log.warn(`Potentially dangerous command detected: ${trimmedCommand.substring(0, 100)}`);
+        throw new SecurityError(`Command contains potentially dangerous pattern. If this is intentional, set ENABLE_COMMAND_VALIDATION=false`);
+      }
+    }
+  }
+
+  /**
+   * Validate working directory
+   */
+  async validateWorkingDirectory(directory: string, isRemote: boolean = false): Promise<void> {
+    if (!directory || typeof directory !== 'string') {
+      throw new ValidationError('Working directory must be a non-empty string');
+    }
+
+    // Check against allowed directories if configured
+    if (this.config.allowedWorkingDirectories !== null) {
+      const isAllowed = this.config.allowedWorkingDirectories.some(allowed => 
+        directory.startsWith(allowed)
+      );
+      if (!isAllowed) {
+        throw new SecurityError(`Working directory '${directory}' is not in the allowed directories list`);
+      }
+    }
+
+    // For local execution, verify directory exists
+    if (!isRemote) {
+      try {
+        const stats = fs.statSync(directory);
+        if (!stats.isDirectory()) {
+          throw new ValidationError(`Path '${directory}' is not a directory`);
+        }
+      } catch (error: any) {
+        if (error.code === 'ENOENT') {
+          throw new ValidationError(`Working directory '${directory}' does not exist`);
+        }
+        if (error.code === 'EACCES') {
+          throw new ValidationError(`No permission to access working directory '${directory}'`);
+        }
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Check if we can create a new session
+   */
+  private checkSessionLimit(): void {
+    const activeCount = this.sessions.size;
+    if (activeCount >= this.config.maxConcurrentSessions) {
+      throw new ResourceLimitError(`Maximum concurrent sessions limit reached (${this.config.maxConcurrentSessions}). Close existing sessions or increase MAX_CONCURRENT_SESSIONS.`);
+    }
+  }
+
+  /**
+   * Truncate output if it exceeds maximum size
+   */
+  private truncateOutput(output: string, label: string = 'output'): string {
+    if (output.length > this.config.maxOutputSize) {
+      const truncated = output.substring(0, this.config.maxOutputSize);
+      const truncatedBytes = output.length - this.config.maxOutputSize;
+      log.warn(`${label} truncated: ${truncatedBytes} bytes removed`);
+      return truncated + `\n\n[OUTPUT TRUNCATED: ${truncatedBytes} bytes removed. Set MAX_OUTPUT_SIZE to increase limit.]`;
+    }
+    return output;
+  }
+
+  /**
+   * Get current configuration
+   */
+  getConfig(): ExecutorConfig {
+    return { ...this.config };
+  }
 
   private getSessionKey(host: string | undefined, sessionName: string): string {
     return `${host || 'local'}-${sessionName}`;
   }
 
   async connect(host: string, username: string, sessionName: string = 'default'): Promise<void> {
+    // Validate session name
+    this.validateSessionName(sessionName);
+    
     const sessionKey = this.getSessionKey(host, sessionName);
     let session = this.sessions.get(sessionKey);
     
@@ -70,6 +260,9 @@ export class CommandExecutor {
       await this.disconnectSession(sessionKey);
     }
 
+    // Check session limit before creating new session
+    this.checkSessionLimit();
+
     // Attempt connection with retry logic
     return this.connectWithRetry(host, username, sessionName);
   }
@@ -81,38 +274,43 @@ export class CommandExecutor {
         return;
       }
       
-      // Check if client has active listeners (indicating it's still connected)
-      const hasActiveListeners = client.listenerCount('ready') > 0 || 
-                                client.listenerCount('error') > 0 ||
-                                client.listenerCount('data') > 0;
-      
-      if (!hasActiveListeners) {
+      // Set a timeout for the health check
+      const healthCheckTimeout = setTimeout(() => {
+        log.debug('Connection health check timed out');
         resolve(false);
-        return;
-      }
-      
-      // Try to send a keepalive to test the connection
+      }, 5000);
+
+      // Use exec with a simple echo command to verify connection
       try {
-        client.subsys('echo', (err, stream) => {
+        client.exec('echo "health-check-ok"', (err, stream) => {
           if (err) {
+            clearTimeout(healthCheckTimeout);
             log.debug(`Connection health check failed: ${err.message}`);
             resolve(false);
             return;
           }
+
+          let output = '';
           
-          stream.on('data', () => {
-            stream.close();
-            resolve(true);
+          stream.on('data', (data: Buffer) => {
+            output += data.toString();
           });
-          
-          stream.on('error', () => {
+
+          stream.on('close', (code: number) => {
+            clearTimeout(healthCheckTimeout);
+            const isHealthy = code === 0 && output.includes('health-check-ok');
+            log.debug(`Connection health check result: ${isHealthy ? 'healthy' : 'unhealthy'}`);
+            resolve(isHealthy);
+          });
+
+          stream.on('error', (err: Error) => {
+            clearTimeout(healthCheckTimeout);
+            log.debug(`Connection health check stream error: ${err.message}`);
             resolve(false);
           });
-          
-          stream.write('health-check');
-          stream.end();
         });
       } catch (error) {
+        clearTimeout(healthCheckTimeout);
         log.debug(`Connection health check error: ${error}`);
         resolve(false);
       }
@@ -122,7 +320,7 @@ export class CommandExecutor {
   private async connectWithRetry(host: string, username: string, sessionName: string): Promise<void> {
     const sessionKey = this.getSessionKey(host, sessionName);
     let retryCount = 0;
-    const maxRetries = this.maxRetries;
+    const maxRetries = this.config.maxRetries;
 
     while (retryCount < maxRetries) {
       try {
@@ -165,9 +363,9 @@ export class CommandExecutor {
       const client = new Client();
       const connection = new Promise<void>((resolve, reject) => {
         const connectionTimer = setTimeout(() => {
-          reject(new TimeoutError(`Connection timeout after ${this.connectionTimeout}ms`));
+          reject(new TimeoutError(`Connection timeout after ${this.config.connectionTimeout}ms`));
           client.destroy();
-        }, this.connectionTimeout);
+        }, this.config.connectionTimeout);
 
         client
           .on('ready', () => {
@@ -243,7 +441,7 @@ export class CommandExecutor {
             username: username,
             privateKey: privateKey,
             keepaliveInterval: 60000,
-            readyTimeout: this.connectionTimeout,
+            readyTimeout: this.config.connectionTimeout,
             algorithms: {
               serverHostKey: ['ssh-rsa', 'ssh-ed25519', 'ecdsa-sha2-nistp256']
             }
@@ -262,7 +460,7 @@ export class CommandExecutor {
         workingDirectory: '/',
         lastActivity: Date.now(),
         retryCount: 0,
-        maxRetries: this.maxRetries
+        maxRetries: this.config.maxRetries
       });
 
       return connection;
@@ -316,7 +514,7 @@ export class CommandExecutor {
     session.timeout = setTimeout(async () => {
       log.info(`Session ${sessionKey} timeout, disconnecting`);
       await this.disconnectSession(sessionKey);
-    }, this.sessionTimeout);
+    }, this.config.sessionTimeout);
 
     this.sessions.set(sessionKey, session);
   }
@@ -340,17 +538,29 @@ export class CommandExecutor {
       workingDirectory,
       timeout = 30000 
     } = options;
-    const sessionKey = this.getSessionKey(host, session);
 
-    // Validate input
-    if (!command || command.trim().length === 0) {
-      throw new CommandExecutionError('Command cannot be empty');
+    // Validate session name
+    this.validateSessionName(session);
+    
+    // Validate command
+    this.validateCommand(command);
+
+    // Validate working directory if provided
+    if (workingDirectory) {
+      await this.validateWorkingDirectory(workingDirectory, !!host);
     }
+
+    const sessionKey = this.getSessionKey(host, session);
 
     // If host is specified, use SSH execution
     if (host) {
       if (!username) {
         throw new CommandExecutionError('Username is required when using SSH');
+      }
+
+      // Validate username format
+      if (!/^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31}$/.test(username)) {
+        throw new ValidationError('Invalid username format');
       }
       
       try {
@@ -370,13 +580,20 @@ export class CommandExecutor {
         }
 
         // Execute command using the most appropriate method
+        let result;
         if (sessionData.shellReady && sessionData.shell) {
-          log.info(`Executing command using interactive shell: ${command}`);
-          return await this.executeWithShell(sessionKey, command, env, timeout);
+          log.info(`Executing command using interactive shell: ${command.substring(0, 100)}${command.length > 100 ? '...' : ''}`);
+          result = await this.executeWithShell(sessionKey, command, env, timeout);
         } else {
-          log.info(`Executing command using exec: ${command}`);
-          return await this.executeWithExec(sessionKey, command, env, timeout);
+          log.info(`Executing command using exec: ${command.substring(0, 100)}${command.length > 100 ? '...' : ''}`);
+          result = await this.executeWithExec(sessionKey, command, env, timeout);
         }
+
+        // Truncate output if necessary
+        result.stdout = this.truncateOutput(result.stdout, 'stdout');
+        result.stderr = this.truncateOutput(result.stderr, 'stderr');
+        
+        return result;
       } catch (error: any) {
         log.error(`Command execution failed: ${error.message}`);
         throw error;
@@ -384,8 +601,19 @@ export class CommandExecutor {
     } 
     // Execute command locally
     else {
-      log.info(`Executing command locally: ${command}`);
-      return await this.executeLocally(sessionKey, command, env, workingDirectory, timeout);
+      // Check session limit for new local sessions
+      if (!this.sessions.has(sessionKey)) {
+        this.checkSessionLimit();
+      }
+      
+      log.info(`Executing command locally: ${command.substring(0, 100)}${command.length > 100 ? '...' : ''}`);
+      const result = await this.executeLocally(sessionKey, command, env, workingDirectory, timeout);
+      
+      // Truncate output if necessary
+      result.stdout = this.truncateOutput(result.stdout, 'stdout');
+      result.stderr = this.truncateOutput(result.stderr, 'stderr');
+      
+      return result;
     }
   }
 

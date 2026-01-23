@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-01-24
+
+### Added
+- **Command Validation**: Dangerous command patterns are now detected and blocked by default (can be disabled with ENABLE_COMMAND_VALIDATION=false)
+- **Output Size Limits**: Large outputs are automatically truncated to prevent memory exhaustion (configurable via MAX_OUTPUT_SIZE, default 5MB)
+- **Session Limits**: Maximum concurrent sessions limit to prevent resource exhaustion (configurable via MAX_CONCURRENT_SESSIONS, default 10)
+- **Session Name Validation**: Session names must be 1-64 alphanumeric characters (with underscores and hyphens)
+- **Working Directory Validation**: Working directories are validated to exist before command execution (local only)
+- **Allowed Directories**: Optionally restrict working directories to a whitelist (ALLOWED_WORKING_DIRECTORIES)
+- **Command Blacklist**: Optionally blacklist specific command prefixes (COMMAND_BLACKLIST)
+- **Configuration Resource**: New `terminal://config` resource to view current server configuration
+- **New Error Types**: ValidationError, SecurityError, ResourceLimitError for better error handling
+
+### Changed
+- **SSH Health Check**: Replaced unreliable subsys-based health check with exec-based check
+- **Timeout Limit**: Increased maximum timeout from 300s to 600s (10 minutes)
+- **Configuration**: All limits and timeouts are now configurable via environment variables
+
+### Security
+- **Dangerous Pattern Detection**: Blocks commands like `rm -rf /`, fork bombs, curl pipe to shell, etc.
+- **Input Sanitization**: Improved validation of session names, hostnames, usernames
+- **Resource Protection**: Limits on sessions and output size prevent denial of service
+
+### Environment Variables
+- `SESSION_TIMEOUT_MS` - Session inactivity timeout (default: 1200000 = 20 minutes)
+- `MAX_RETRIES` - SSH connection retry attempts (default: 3)
+- `CONNECTION_TIMEOUT_MS` - SSH connection timeout (default: 30000)
+- `MAX_CONCURRENT_SESSIONS` - Maximum concurrent sessions (default: 10)
+- `MAX_OUTPUT_SIZE` - Maximum output size in bytes (default: 5242880 = 5MB)
+- `ENABLE_COMMAND_VALIDATION` - Enable dangerous command blocking (default: true)
+- `COMMAND_BLACKLIST` - Comma-separated blacklisted command prefixes
+- `ALLOWED_WORKING_DIRECTORIES` - Comma-separated allowed directory prefixes
+
 ## [1.0.0] - 2025-01-XX
 
 ### Added

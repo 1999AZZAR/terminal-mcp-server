@@ -46,15 +46,16 @@ Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for
 - **Session Persistence**: Support for persistent sessions that reuse the same terminal environment for a specified time (default 20 minutes)
 - **Working Directory Management**: Set and persist working directories across commands in sessions
 - **Environment Variables**: Set custom environment variables for commands with persistence across session
-- **Configurable Timeouts**: Set custom command timeouts (1-300 seconds) with proper timeout handling
+- **Configurable Timeouts**: Set custom command timeouts (1-600 seconds) with proper timeout handling
 - **Enhanced Error Handling**: Detailed error messages with automatic retry mechanisms for SSH connections
 - **Robust Session Management**: Automatic connection pooling, reconnection, and graceful cleanup
 - **Exit Code Reporting**: Commands return proper exit codes for better error detection
 - **Stdio Connection**: Connect via standard input/output for direct integration
+- **Security Features**: Command validation, dangerous pattern detection, output size limits, session limits
 
 ## Available Resources
 
-Terminal MCP Server provides **7 key resources** that enhance reliability and performance by providing system visibility, session management, and terminal multiplexing capabilities:
+Terminal MCP Server provides **8 key resources** that enhance reliability and performance by providing system visibility, session management, and terminal multiplexing capabilities:
 
 ### `terminal://sessions/status`
 Returns comprehensive information about active terminal sessions, including connection health, working directories, environment variables, and session timeouts.
@@ -117,6 +118,34 @@ Returns comprehensive information about active terminal sessions, including conn
 }
 ```
 
+### `terminal://config`
+Returns current server configuration including security settings, limits, and timeouts.
+
+**Resource Details:**
+- **Purpose**: View active security and resource limit configuration
+- **Benefits**: Verify configuration settings, troubleshoot limit issues
+- **Performance Impact**: Minimal - returns cached configuration
+
+**Response Format:**
+```json
+{
+  "sessionTimeout": 1200000,
+  "maxRetries": 3,
+  "connectionTimeout": 30000,
+  "maxConcurrentSessions": 10,
+  "maxOutputSize": 5242880,
+  "enableCommandValidation": true,
+  "commandBlacklist": [],
+  "allowedWorkingDirectories": null,
+  "description": {
+    "sessionTimeout": "Session inactivity timeout in milliseconds (env: SESSION_TIMEOUT_MS)",
+    "maxConcurrentSessions": "Maximum number of concurrent sessions allowed (env: MAX_CONCURRENT_SESSIONS)",
+    ...
+  },
+  "timestamp": "2025-11-02T17:09:14.866Z"
+}
+```
+
 ### `terminal://system/info`
 Provides basic system information to help with command execution planning and troubleshooting.
 
@@ -146,7 +175,6 @@ Provides basic system information to help with command execution planning and tr
     "HOME": "/home/user"
   },
   "timestamp": "2025-11-02T17:09:14.866Z"
-
 }
 ```
 
@@ -644,6 +672,71 @@ If environment variables aren't persisting:
 - Working directories and environment variables persist within the same session
 - Timeout values must be between 1 and 300 seconds (1000-300000 milliseconds)
 
+## Security Features
+
+This implementation includes comprehensive security measures:
+
+### Command Validation
+
+Dangerous command patterns are automatically detected and blocked:
+- `rm -rf /` and similar destructive commands
+- Fork bombs like `:(){ :|:& };:`
+- Pipe to shell patterns like `curl ... | bash`
+- Direct writes to system directories (`/etc/`, `/boot/`)
+- Device operations (`dd of=/dev/...`, `mkfs`)
+
+To disable command validation (not recommended):
+```bash
+ENABLE_COMMAND_VALIDATION=false node build/index.js
+```
+
+### Resource Limits
+
+- **Output Size Limit**: Large command outputs are automatically truncated (default 5MB)
+- **Session Limit**: Maximum concurrent sessions prevents resource exhaustion (default 10)
+- **Session Timeout**: Inactive sessions are automatically cleaned up (default 20 minutes)
+
+### Input Validation
+
+- Session names must be 1-64 alphanumeric characters (with underscores/hyphens)
+- Working directories are validated to exist for local commands
+- Hostnames and usernames are validated for proper format
+- Optional directory whitelist restricts where commands can execute
+
+## Configuration
+
+All limits and timeouts are configurable via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SESSION_TIMEOUT_MS` | 1200000 | Session inactivity timeout in milliseconds (20 min) |
+| `MAX_RETRIES` | 3 | Maximum SSH connection retry attempts |
+| `CONNECTION_TIMEOUT_MS` | 30000 | SSH connection timeout in milliseconds |
+| `MAX_CONCURRENT_SESSIONS` | 10 | Maximum number of concurrent sessions |
+| `MAX_OUTPUT_SIZE` | 5242880 | Maximum output size in bytes (5MB) |
+| `ENABLE_COMMAND_VALIDATION` | true | Enable dangerous command pattern blocking |
+| `COMMAND_BLACKLIST` | (empty) | Comma-separated list of blacklisted command prefixes |
+| `ALLOWED_WORKING_DIRECTORIES` | (all) | Comma-separated list of allowed directory prefixes |
+| `SSH_KEY_PATH` | ~/.ssh/id_rsa | Path to SSH private key |
+| `DEBUG` | false | Enable debug logging |
+
+### Example Configuration
+
+```bash
+# Restrictive configuration for production
+export MAX_CONCURRENT_SESSIONS=5
+export MAX_OUTPUT_SIZE=1048576  # 1MB
+export ALLOWED_WORKING_DIRECTORIES="/home/user/projects,/tmp"
+export COMMAND_BLACKLIST="shutdown,reboot,poweroff"
+node build/index.js
+
+# Permissive configuration for development
+export ENABLE_COMMAND_VALIDATION=false
+export MAX_OUTPUT_SIZE=52428800  # 50MB
+export MAX_CONCURRENT_SESSIONS=50
+node build/index.js
+```
+
 ## Robustness Features
 
 This implementation includes several enterprise-grade robustness features:
@@ -654,3 +747,4 @@ This implementation includes several enterprise-grade robustness features:
 - **Input Validation**: All parameters are validated with clear error messages
 - **Resource Management**: Sessions are properly managed with automatic cleanup of inactive connections
 - **Error Recovery**: The server continues operating even after individual command failures
+- **Output Truncation**: Large outputs are safely truncated to prevent memory issues

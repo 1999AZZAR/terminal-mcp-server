@@ -5,7 +5,7 @@
   },
   "extends": [
     "eslint:recommended",
-    "@typescript-eslint/recommended"
+    "plugin:@typescript-eslint/recommended"
   ],
   "parser": "@typescript-eslint/parser",
   "parserOptions": {
@@ -16,6 +16,5 @@
   "rules": {
     "@typescript-eslint/no-unused-vars": "warn",
     "@typescript-eslint/no-explicit-any": "warn"
-  },
-  "ignorePatterns": ["build/", "node_modules/"]
+  }
 }

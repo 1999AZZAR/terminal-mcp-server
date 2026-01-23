@@ -14,7 +14,10 @@ import {
   CommandExecutor, 
   CommandExecutionError, 
   TimeoutError, 
-  SshConnectionError 
+  SshConnectionError,
+  ValidationError,
+  SecurityError,
+  ResourceLimitError
 } from "./executor.js";
 import { log } from "./logger.js";
 
@@ -40,7 +43,7 @@ function createServer() {
       tools: [
         {
           name: "execute_command",
-          description: "Execute commands on remote hosts or locally. Returns a JSON object with 'command', 'exitCode', 'stdout', and 'stderr'.",
+          description: "Execute commands on remote hosts or locally. Returns a JSON object with 'command', 'exitCode', 'stdout', and 'stderr'. Commands are validated for dangerous patterns. Output is truncated if exceeding size limits.",
           inputSchema: {
             type: "object",
             properties: {
@@ -54,12 +57,12 @@ function createServer() {
               },
               session: {
                 type: "string",
-                description: "Session name, defaults to 'default'. Reuse to persist state.",
+                description: "Session name (1-64 alphanumeric chars, underscores, hyphens). Defaults to 'default'. Reuse to persist state.",
                 default: "default"
               },
               command: {
                 type: "string",
-                description: "Command to execute."
+                description: "Command to execute. Validated for dangerous patterns unless ENABLE_COMMAND_VALIDATION=false."
               },
               env: {
                 type: "object",
@@ -68,11 +71,11 @@ function createServer() {
               },
               workingDirectory: {
                 type: "string",
-                description: "Working directory for command execution."
+                description: "Working directory for command execution. Validated to exist for local commands."
               },
               timeout: {
                 type: "number",
-                description: "Command timeout in milliseconds (default: 30000)",
+                description: "Command timeout in milliseconds (default: 30000, max: 600000)",
                 default: 30000
               }
             },
@@ -107,8 +110,18 @@ function createServer() {
         throw new McpError(ErrorCode.InvalidParams, "Username is required when host is specified");
       }
       
-      if (timeout && (timeout < 1000 || timeout > 300000)) {
-        throw new McpError(ErrorCode.InvalidParams, "Timeout must be between 1000 and 300000 milliseconds");
+      if (timeout && (timeout < 1000 || timeout > 600000)) {
+        throw new McpError(ErrorCode.InvalidParams, "Timeout must be between 1000 and 600000 milliseconds (1 second to 10 minutes)");
+      }
+
+      // Validate session name format
+      if (session && !/^[a-zA-Z0-9_-]{1,64}$/.test(session)) {
+        throw new McpError(ErrorCode.InvalidParams, "Session name must be 1-64 characters and contain only alphanumeric characters, underscores, and hyphens");
+      }
+
+      // Validate host format if provided
+      if (host && !/^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(host)) {
+        throw new McpError(ErrorCode.InvalidParams, "Invalid host format");
       }
 
       try {
@@ -137,6 +150,21 @@ function createServer() {
           }]
         };
       } catch (error) {
+        // Handle validation errors
+        if (error instanceof ValidationError) {
+          throw new McpError(ErrorCode.InvalidParams, `Validation Error: ${error.message}`);
+        }
+
+        // Handle security errors
+        if (error instanceof SecurityError) {
+          throw new McpError(ErrorCode.InvalidParams, `Security Error: ${error.message}`);
+        }
+
+        // Handle resource limit errors
+        if (error instanceof ResourceLimitError) {
+          throw new McpError(ErrorCode.InternalError, `Resource Limit: ${error.message}`);
+        }
+
         if (error instanceof CommandExecutionError) {
           // Even if there is an error (like non-zero exit code if caught by exec), return structured data if available
           if (error.stdout || error.stderr) {
@@ -189,6 +217,12 @@ function createServer() {
           uri: "terminal://sessions/status",
           name: "Terminal Sessions Status",
           description: "Current status of active terminal sessions including working directories, environment variables, and connection health",
+          mimeType: "application/json",
+        },
+        {
+          uri: "terminal://config",
+          name: "Server Configuration",
+          description: "Current server configuration including security settings, limits, and timeouts",
           mimeType: "application/json",
         },
         {
@@ -251,6 +285,39 @@ function createServer() {
           throw new McpError(
             ErrorCode.InternalError,
             `Failed to retrieve session status: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+
+      case "terminal://config":
+        try {
+          const config = commandExecutor.getConfig();
+          const configInfo = {
+            ...config,
+            description: {
+              sessionTimeout: "Session inactivity timeout in milliseconds (env: SESSION_TIMEOUT_MS)",
+              maxRetries: "Maximum SSH connection retry attempts (env: MAX_RETRIES)",
+              connectionTimeout: "SSH connection timeout in milliseconds (env: CONNECTION_TIMEOUT_MS)",
+              maxConcurrentSessions: "Maximum number of concurrent sessions allowed (env: MAX_CONCURRENT_SESSIONS)",
+              maxOutputSize: "Maximum output size in bytes before truncation (env: MAX_OUTPUT_SIZE)",
+              enableCommandValidation: "Whether dangerous command patterns are blocked (env: ENABLE_COMMAND_VALIDATION)",
+              commandBlacklist: "Comma-separated list of blacklisted command prefixes (env: COMMAND_BLACKLIST)",
+              allowedWorkingDirectories: "Comma-separated list of allowed working directory prefixes, null means all allowed (env: ALLOWED_WORKING_DIRECTORIES)",
+            },
+            timestamp: new Date().toISOString(),
+          };
+          return {
+            contents: [
+              {
+                uri,
+                mimeType: "application/json",
+                text: JSON.stringify(configInfo, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          throw new McpError(
+            ErrorCode.InternalError,
+            `Failed to retrieve configuration: ${error instanceof Error ? error.message : String(error)}`
           );
         }
 
