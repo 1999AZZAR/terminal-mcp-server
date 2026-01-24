@@ -17,7 +17,8 @@ import {
   SshConnectionError,
   ValidationError,
   SecurityError,
-  ResourceLimitError
+  ResourceLimitError,
+  RateLimitError
 } from "./executor.js";
 import { log } from "./logger.js";
 
@@ -43,7 +44,7 @@ function createServer() {
       tools: [
         {
           name: "execute_command",
-          description: "Execute commands on remote hosts or locally. Returns a JSON object with 'command', 'exitCode', 'stdout', and 'stderr'. Commands are validated for dangerous patterns. Output is truncated if exceeding size limits.",
+          description: "Execute commands on remote hosts or locally. Returns a JSON object with 'command', 'exitCode', 'stdout', and 'stderr'. Commands are validated for dangerous patterns. Output is truncated if exceeding size limits. Rate limited per session.",
           inputSchema: {
             type: "object",
             properties: {
@@ -81,6 +82,47 @@ function createServer() {
             },
             required: ["command"]
           }
+        },
+        {
+          name: "transfer_file",
+          description: "Transfer files between local machine and remote hosts via SFTP, or copy files locally. Supports upload, download, and local copy operations with size limits and validation.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              source: {
+                type: "string",
+                description: "Source file path. For uploads: local path. For downloads: remote path. For local copy: source path."
+              },
+              destination: {
+                type: "string",
+                description: "Destination file path. For uploads: remote path. For downloads: local path. For local copy: destination path."
+              },
+              direction: {
+                type: "string",
+                enum: ["upload", "download", "local"],
+                description: "Transfer direction: 'upload' (local to remote), 'download' (remote to local), or 'local' (local copy)"
+              },
+              host: {
+                type: "string",
+                description: "Remote host (required for upload/download, omit for local copy)"
+              },
+              username: {
+                type: "string",
+                description: "Username for SSH connection (required for upload/download)"
+              },
+              session: {
+                type: "string",
+                description: "Session name for connection reuse (default: 'default')",
+                default: "default"
+              },
+              overwrite: {
+                type: "boolean",
+                description: "Overwrite destination if it exists (default: false)",
+                default: false
+              }
+            },
+            required: ["source", "destination", "direction"]
+          }
         }
       ]
     };
@@ -88,7 +130,87 @@ function createServer() {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
-      if (request.params.name !== "execute_command") {
+      const toolName = request.params.name;
+
+      // Handle transfer_file tool
+      if (toolName === "transfer_file") {
+        const source = request.params.arguments?.source ? String(request.params.arguments.source) : undefined;
+        const destination = request.params.arguments?.destination ? String(request.params.arguments.destination) : undefined;
+        const direction = request.params.arguments?.direction ? String(request.params.arguments.direction) : undefined;
+        const host = request.params.arguments?.host ? String(request.params.arguments.host) : undefined;
+        const username = request.params.arguments?.username ? String(request.params.arguments.username) : undefined;
+        const session = String(request.params.arguments?.session || "default");
+        const overwrite = Boolean(request.params.arguments?.overwrite || false);
+
+        if (!source) {
+          throw new McpError(ErrorCode.InvalidParams, "Source path is required");
+        }
+        if (!destination) {
+          throw new McpError(ErrorCode.InvalidParams, "Destination path is required");
+        }
+        if (!direction || !["upload", "download", "local"].includes(direction)) {
+          throw new McpError(ErrorCode.InvalidParams, "Direction must be 'upload', 'download', or 'local'");
+        }
+
+        if (direction !== "local") {
+          if (!host) {
+            throw new McpError(ErrorCode.InvalidParams, "Host is required for upload/download operations");
+          }
+          if (!username) {
+            throw new McpError(ErrorCode.InvalidParams, "Username is required for upload/download operations");
+          }
+        }
+
+        try {
+          let result;
+          if (direction === "local") {
+            result = await commandExecutor.copyFileLocal({ source, destination, overwrite });
+          } else {
+            result = await commandExecutor.transferFile({
+              source,
+              destination,
+              direction: direction as "upload" | "download",
+              host: host!,
+              username: username!,
+              session,
+              overwrite
+            });
+          }
+
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }]
+          };
+        } catch (error) {
+          if (error instanceof ValidationError) {
+            throw new McpError(ErrorCode.InvalidParams, `Validation Error: ${error.message}`);
+          }
+          if (error instanceof SecurityError) {
+            throw new McpError(ErrorCode.InvalidParams, `Security Error: ${error.message}`);
+          }
+          if (error instanceof ResourceLimitError) {
+            throw new McpError(ErrorCode.InternalError, `Resource Limit: ${error.message}`);
+          }
+          if (error instanceof RateLimitError) {
+            throw new McpError(ErrorCode.InternalError, `Rate Limit: ${error.message}`);
+          }
+          if (error instanceof SshConnectionError) {
+            throw new McpError(ErrorCode.InternalError, `SSH Error: ${error.message}`);
+          }
+          if (error instanceof TimeoutError) {
+            throw new McpError(ErrorCode.InternalError, `Timeout: ${error.message}`);
+          }
+          if (error instanceof Error) {
+            throw new McpError(ErrorCode.InternalError, error.message);
+          }
+          throw error;
+        }
+      }
+
+      // Handle execute_command tool
+      if (toolName !== "execute_command") {
         throw new McpError(ErrorCode.MethodNotFound, "Unknown tool");
       }
       
@@ -163,6 +285,11 @@ function createServer() {
         // Handle resource limit errors
         if (error instanceof ResourceLimitError) {
           throw new McpError(ErrorCode.InternalError, `Resource Limit: ${error.message}`);
+        }
+
+        // Handle rate limit errors
+        if (error instanceof RateLimitError) {
+          throw new McpError(ErrorCode.InternalError, `Rate Limit: ${error.message}`);
         }
 
         if (error instanceof CommandExecutionError) {
@@ -302,6 +429,9 @@ function createServer() {
               enableCommandValidation: "Whether dangerous command patterns are blocked (env: ENABLE_COMMAND_VALIDATION)",
               commandBlacklist: "Comma-separated list of blacklisted command prefixes (env: COMMAND_BLACKLIST)",
               allowedWorkingDirectories: "Comma-separated list of allowed working directory prefixes, null means all allowed (env: ALLOWED_WORKING_DIRECTORIES)",
+              rateLimitPerMinute: "Maximum commands per minute per session (env: RATE_LIMIT_PER_MINUTE)",
+              rateLimitEnabled: "Whether rate limiting is enabled (env: RATE_LIMIT_ENABLED)",
+              maxFileTransferSize: "Maximum file size for transfers in bytes (env: MAX_FILE_TRANSFER_SIZE)",
             },
             timestamp: new Date().toISOString(),
           };

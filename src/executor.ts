@@ -48,6 +48,13 @@ export class ResourceLimitError extends Error {
   }
 }
 
+export class RateLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RateLimitError';
+  }
+}
+
 // Configuration interface
 export interface ExecutorConfig {
   sessionTimeout: number;
@@ -58,6 +65,9 @@ export interface ExecutorConfig {
   enableCommandValidation: boolean;
   commandBlacklist: string[];
   allowedWorkingDirectories: string[] | null; // null means all directories allowed
+  rateLimitPerMinute: number; // max commands per minute per session
+  rateLimitEnabled: boolean;
+  maxFileTransferSize: number; // max file size for transfers in bytes
 }
 
 // Default configuration with environment variable overrides
@@ -73,6 +83,9 @@ function getConfig(): ExecutorConfig {
     allowedWorkingDirectories: process.env.ALLOWED_WORKING_DIRECTORIES 
       ? process.env.ALLOWED_WORKING_DIRECTORIES.split(',').filter(Boolean)
       : null,
+    rateLimitPerMinute: parseInt(process.env.RATE_LIMIT_PER_MINUTE || '60', 10),
+    rateLimitEnabled: process.env.RATE_LIMIT_ENABLED !== 'false',
+    maxFileTransferSize: parseInt(process.env.MAX_FILE_TRANSFER_SIZE || '104857600', 10), // 100MB default
   };
 }
 
@@ -90,6 +103,7 @@ export class CommandExecutor {
     lastActivity?: number;
     retryCount?: number;
     maxRetries?: number;
+    commandTimestamps?: number[]; // Track command execution times for rate limiting
   }> = new Map();
   
   private config: ExecutorConfig;
@@ -234,6 +248,74 @@ export class CommandExecutor {
    */
   getConfig(): ExecutorConfig {
     return { ...this.config };
+  }
+
+  /**
+   * Check and enforce rate limiting for a session
+   */
+  private checkRateLimit(sessionKey: string): void {
+    if (!this.config.rateLimitEnabled) {
+      return;
+    }
+
+    const session = this.sessions.get(sessionKey);
+    if (!session) {
+      return; // New session, will be created
+    }
+
+    const now = Date.now();
+    const oneMinuteAgo = now - 60000;
+
+    // Initialize or clean up old timestamps
+    if (!session.commandTimestamps) {
+      session.commandTimestamps = [];
+    }
+
+    // Remove timestamps older than 1 minute
+    session.commandTimestamps = session.commandTimestamps.filter(ts => ts > oneMinuteAgo);
+
+    // Check if limit exceeded
+    if (session.commandTimestamps.length >= this.config.rateLimitPerMinute) {
+      const oldestTimestamp = session.commandTimestamps[0];
+      const waitTime = Math.ceil((oldestTimestamp + 60000 - now) / 1000);
+      throw new RateLimitError(
+        `Rate limit exceeded: ${this.config.rateLimitPerMinute} commands per minute. ` +
+        `Please wait ${waitTime} seconds or increase RATE_LIMIT_PER_MINUTE.`
+      );
+    }
+
+    // Record this command
+    session.commandTimestamps.push(now);
+    this.sessions.set(sessionKey, session);
+  }
+
+  /**
+   * Get rate limit status for a session
+   */
+  getRateLimitStatus(sessionKey: string): { remaining: number; resetIn: number; limit: number } {
+    const session = this.sessions.get(sessionKey);
+    const now = Date.now();
+    const oneMinuteAgo = now - 60000;
+
+    if (!session || !session.commandTimestamps) {
+      return {
+        remaining: this.config.rateLimitPerMinute,
+        resetIn: 0,
+        limit: this.config.rateLimitPerMinute
+      };
+    }
+
+    const recentCommands = session.commandTimestamps.filter(ts => ts > oneMinuteAgo);
+    const remaining = Math.max(0, this.config.rateLimitPerMinute - recentCommands.length);
+    const resetIn = recentCommands.length > 0 
+      ? Math.ceil((recentCommands[0] + 60000 - now) / 1000)
+      : 0;
+
+    return {
+      remaining,
+      resetIn: Math.max(0, resetIn),
+      limit: this.config.rateLimitPerMinute
+    };
   }
 
   private getSessionKey(host: string | undefined, sessionName: string): string {
@@ -551,6 +633,9 @@ export class CommandExecutor {
     }
 
     const sessionKey = this.getSessionKey(host, session);
+
+    // Check rate limiting
+    this.checkRateLimit(sessionKey);
 
     // If host is specified, use SSH execution
     if (host) {
@@ -1191,5 +1276,309 @@ export class CommandExecutor {
         timestamp: new Date().toISOString(),
       };
     }
+  }
+
+  // ==================== File Transfer Methods ====================
+
+  /**
+   * Transfer file between local and remote host via SFTP
+   */
+  async transferFile(options: {
+    source: string;
+    destination: string;
+    direction: 'upload' | 'download';
+    host: string;
+    username: string;
+    session?: string;
+    overwrite?: boolean;
+  }): Promise<{ success: boolean; bytesTransferred: number; message: string }> {
+    const { source, destination, direction, host, username, session = 'default', overwrite = false } = options;
+
+    // Validate session name
+    this.validateSessionName(session);
+
+    // Validate paths
+    if (!source || typeof source !== 'string' || source.trim().length === 0) {
+      throw new ValidationError('Source path is required');
+    }
+    if (!destination || typeof destination !== 'string' || destination.trim().length === 0) {
+      throw new ValidationError('Destination path is required');
+    }
+
+    // Check for path traversal attempts
+    if (source.includes('..') || destination.includes('..')) {
+      throw new SecurityError('Path traversal (..) is not allowed in file paths');
+    }
+
+    const sessionKey = this.getSessionKey(host, session);
+
+    // Check rate limiting
+    this.checkRateLimit(sessionKey);
+
+    // Ensure connection
+    await this.connect(host, username, session);
+    const sessionData = this.sessions.get(sessionKey);
+
+    if (!sessionData || !sessionData.client) {
+      throw new SshConnectionError(`Failed to establish SSH connection to ${host}`);
+    }
+
+    // Validate file size for uploads
+    if (direction === 'upload') {
+      try {
+        const stats = fs.statSync(source);
+        if (!stats.isFile()) {
+          throw new ValidationError(`Source '${source}' is not a file`);
+        }
+        if (stats.size > this.config.maxFileTransferSize) {
+          throw new ResourceLimitError(
+            `File size (${stats.size} bytes) exceeds maximum transfer size (${this.config.maxFileTransferSize} bytes). ` +
+            `Increase MAX_FILE_TRANSFER_SIZE to allow larger transfers.`
+          );
+        }
+      } catch (error: any) {
+        if (error.code === 'ENOENT') {
+          throw new ValidationError(`Source file '${source}' does not exist`);
+        }
+        if (error.code === 'EACCES') {
+          throw new ValidationError(`No permission to read source file '${source}'`);
+        }
+        throw error;
+      }
+    }
+
+    return new Promise((resolve, reject) => {
+      sessionData.client!.sftp((err, sftp) => {
+        if (err) {
+          reject(new SshConnectionError(`Failed to create SFTP session: ${err.message}`));
+          return;
+        }
+
+        const transferTimeout = setTimeout(() => {
+          sftp.end();
+          reject(new TimeoutError('File transfer timed out'));
+        }, this.config.connectionTimeout * 2); // Double timeout for file transfers
+
+        if (direction === 'upload') {
+          // Upload: local to remote
+          const readStream = fs.createReadStream(source);
+          
+          // Check if destination exists (unless overwrite is true)
+          sftp.stat(destination, (statErr) => {
+            if (!statErr && !overwrite) {
+              clearTimeout(transferTimeout);
+              sftp.end();
+              reject(new ValidationError(`Destination file '${destination}' already exists. Set overwrite=true to replace.`));
+              return;
+            }
+
+            const writeStream = sftp.createWriteStream(destination);
+            let bytesTransferred = 0;
+
+            readStream.on('data', (chunk) => {
+              bytesTransferred += chunk.length;
+            });
+
+            readStream.on('error', (readErr) => {
+              clearTimeout(transferTimeout);
+              sftp.end();
+              reject(new CommandExecutionError(`Error reading source file: ${readErr.message}`));
+            });
+
+            writeStream.on('error', (writeErr: Error) => {
+              clearTimeout(transferTimeout);
+              sftp.end();
+              reject(new CommandExecutionError(`Error writing to remote file: ${writeErr.message}`));
+            });
+
+            writeStream.on('close', () => {
+              clearTimeout(transferTimeout);
+              sftp.end();
+              log.info(`Upload completed: ${source} -> ${host}:${destination} (${bytesTransferred} bytes)`);
+              resolve({
+                success: true,
+                bytesTransferred,
+                message: `Successfully uploaded ${source} to ${host}:${destination}`
+              });
+            });
+
+            readStream.pipe(writeStream);
+          });
+        } else {
+          // Download: remote to local
+          // First check remote file size
+          sftp.stat(source, (statErr, stats) => {
+            if (statErr) {
+              clearTimeout(transferTimeout);
+              sftp.end();
+              if (statErr.message.includes('No such file')) {
+                reject(new ValidationError(`Remote file '${source}' does not exist`));
+              } else {
+                reject(new SshConnectionError(`Failed to stat remote file: ${statErr.message}`));
+              }
+              return;
+            }
+
+            if (stats.size > this.config.maxFileTransferSize) {
+              clearTimeout(transferTimeout);
+              sftp.end();
+              reject(new ResourceLimitError(
+                `Remote file size (${stats.size} bytes) exceeds maximum transfer size (${this.config.maxFileTransferSize} bytes). ` +
+                `Increase MAX_FILE_TRANSFER_SIZE to allow larger transfers.`
+              ));
+              return;
+            }
+
+            // Check if local destination exists
+            if (!overwrite && fs.existsSync(destination)) {
+              clearTimeout(transferTimeout);
+              sftp.end();
+              reject(new ValidationError(`Local destination '${destination}' already exists. Set overwrite=true to replace.`));
+              return;
+            }
+
+            // Ensure destination directory exists
+            const destDir = path.dirname(destination);
+            if (!fs.existsSync(destDir)) {
+              try {
+                fs.mkdirSync(destDir, { recursive: true });
+              } catch (mkdirErr: any) {
+                clearTimeout(transferTimeout);
+                sftp.end();
+                reject(new ValidationError(`Failed to create destination directory: ${mkdirErr.message}`));
+                return;
+              }
+            }
+
+            const readStream = sftp.createReadStream(source);
+            const writeStream = fs.createWriteStream(destination);
+            let bytesTransferred = 0;
+
+            readStream.on('data', (chunk: Buffer) => {
+              bytesTransferred += chunk.length;
+            });
+
+            readStream.on('error', (readErr: Error) => {
+              clearTimeout(transferTimeout);
+              sftp.end();
+              // Clean up partial file
+              try { fs.unlinkSync(destination); } catch (e) { /* ignore */ }
+              reject(new CommandExecutionError(`Error reading remote file: ${readErr.message}`));
+            });
+
+            writeStream.on('error', (writeErr) => {
+              clearTimeout(transferTimeout);
+              sftp.end();
+              // Clean up partial file
+              try { fs.unlinkSync(destination); } catch (e) { /* ignore */ }
+              reject(new CommandExecutionError(`Error writing local file: ${writeErr.message}`));
+            });
+
+            writeStream.on('close', () => {
+              clearTimeout(transferTimeout);
+              sftp.end();
+              log.info(`Download completed: ${host}:${source} -> ${destination} (${bytesTransferred} bytes)`);
+              resolve({
+                success: true,
+                bytesTransferred,
+                message: `Successfully downloaded ${host}:${source} to ${destination}`
+              });
+            });
+
+            readStream.pipe(writeStream);
+          });
+        }
+      });
+    });
+  }
+
+  /**
+   * Copy file locally (non-SSH)
+   */
+  async copyFileLocal(options: {
+    source: string;
+    destination: string;
+    overwrite?: boolean;
+  }): Promise<{ success: boolean; bytesTransferred: number; message: string }> {
+    const { source, destination, overwrite = false } = options;
+
+    // Validate paths
+    if (!source || typeof source !== 'string' || source.trim().length === 0) {
+      throw new ValidationError('Source path is required');
+    }
+    if (!destination || typeof destination !== 'string' || destination.trim().length === 0) {
+      throw new ValidationError('Destination path is required');
+    }
+
+    // Check for path traversal
+    if (source.includes('..') || destination.includes('..')) {
+      throw new SecurityError('Path traversal (..) is not allowed in file paths');
+    }
+
+    // Validate source exists and get size
+    let fileSize: number;
+    try {
+      const stats = fs.statSync(source);
+      if (!stats.isFile()) {
+        throw new ValidationError(`Source '${source}' is not a file`);
+      }
+      fileSize = stats.size;
+      if (fileSize > this.config.maxFileTransferSize) {
+        throw new ResourceLimitError(
+          `File size (${fileSize} bytes) exceeds maximum transfer size (${this.config.maxFileTransferSize} bytes).`
+        );
+      }
+    } catch (error: any) {
+      if (error.code === 'ENOENT') {
+        throw new ValidationError(`Source file '${source}' does not exist`);
+      }
+      if (error.code === 'EACCES') {
+        throw new ValidationError(`No permission to read source file '${source}'`);
+      }
+      throw error;
+    }
+
+    // Check destination
+    if (!overwrite && fs.existsSync(destination)) {
+      throw new ValidationError(`Destination '${destination}' already exists. Set overwrite=true to replace.`);
+    }
+
+    // Ensure destination directory exists
+    const destDir = path.dirname(destination);
+    if (!fs.existsSync(destDir)) {
+      fs.mkdirSync(destDir, { recursive: true });
+    }
+
+    // Copy file
+    return new Promise((resolve, reject) => {
+      const readStream = fs.createReadStream(source);
+      const writeStream = fs.createWriteStream(destination);
+      let bytesTransferred = 0;
+
+      readStream.on('data', (chunk) => {
+        bytesTransferred += chunk.length;
+      });
+
+      readStream.on('error', (err) => {
+        try { fs.unlinkSync(destination); } catch (e) { /* ignore */ }
+        reject(new CommandExecutionError(`Error reading source file: ${err.message}`));
+      });
+
+      writeStream.on('error', (err) => {
+        try { fs.unlinkSync(destination); } catch (e) { /* ignore */ }
+        reject(new CommandExecutionError(`Error writing destination file: ${err.message}`));
+      });
+
+      writeStream.on('close', () => {
+        log.info(`Local copy completed: ${source} -> ${destination} (${bytesTransferred} bytes)`);
+        resolve({
+          success: true,
+          bytesTransferred,
+          message: `Successfully copied ${source} to ${destination}`
+        });
+      });
+
+      readStream.pipe(writeStream);
+    });
   }
 }

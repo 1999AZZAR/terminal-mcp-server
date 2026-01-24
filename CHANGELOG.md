@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-01-24
+
+### Added
+- **Rate Limiting**: Per-session command rate limiting to prevent abuse (default: 60 commands/minute)
+  - Configurable via RATE_LIMIT_PER_MINUTE env var
+  - Can be disabled with RATE_LIMIT_ENABLED=false
+- **File Transfer Tool**: New `transfer_file` tool for SFTP file transfers
+  - Upload files from local to remote host
+  - Download files from remote to local
+  - Local file copy operation
+  - Size limits configurable via MAX_FILE_TRANSFER_SIZE (default: 100MB)
+  - Overwrite protection with optional override
+- **RateLimitError**: New error type for rate limit violations
+
+### Environment Variables
+- `RATE_LIMIT_PER_MINUTE` - Maximum commands per minute per session (default: 60)
+- `RATE_LIMIT_ENABLED` - Enable/disable rate limiting (default: true)
+- `MAX_FILE_TRANSFER_SIZE` - Maximum file size for transfers in bytes (default: 104857600 = 100MB)
+
 ## [1.1.0] - 2026-01-24
 
 ### Added

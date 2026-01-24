@@ -51,7 +51,8 @@ Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for
 - **Robust Session Management**: Automatic connection pooling, reconnection, and graceful cleanup
 - **Exit Code Reporting**: Commands return proper exit codes for better error detection
 - **Stdio Connection**: Connect via standard input/output for direct integration
-- **Security Features**: Command validation, dangerous pattern detection, output size limits, session limits
+- **Security Features**: Command validation, dangerous pattern detection, output size limits, session limits, rate limiting
+- **File Transfers**: Upload and download files via SFTP, local file copy operations
 
 ## Available Resources
 
@@ -404,11 +405,13 @@ npm run inspector
 npm test
 ```
 
-## The execute_command Tool
+## Available Tools
+
+### execute_command
 
 The execute_command tool is the core functionality provided by Terminal MCP Server, used to execute commands on local or remote hosts with enhanced robustness and reliability.
 
-### Parameters
+#### Parameters
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -467,6 +470,60 @@ The execute_command tool is the core functionality provided by Terminal MCP Serv
   "command": "sleep 10 && echo 'Task completed'",
   "timeout": 15000,
   "session": "long-running-task"
+}
+```
+
+### transfer_file
+
+The transfer_file tool enables file transfers between local and remote hosts via SFTP, as well as local file copy operations.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| source | string | Yes | Source file path |
+| destination | string | Yes | Destination file path |
+| direction | string | Yes | Transfer direction: 'upload', 'download', or 'local' |
+| host | string | For remote | Remote host (required for upload/download) |
+| username | string | For remote | SSH username (required for upload/download) |
+| session | string | No | Session name for connection reuse (default: 'default') |
+| overwrite | boolean | No | Overwrite destination if exists (default: false) |
+
+#### Examples
+
+##### Upload File to Remote Host
+
+```json
+{
+  "source": "/local/path/file.txt",
+  "destination": "/remote/path/file.txt",
+  "direction": "upload",
+  "host": "example.com",
+  "username": "user",
+  "overwrite": true
+}
+```
+
+##### Download File from Remote Host
+
+```json
+{
+  "source": "/remote/path/file.txt",
+  "destination": "/local/path/file.txt",
+  "direction": "download",
+  "host": "example.com",
+  "username": "user"
+}
+```
+
+##### Local File Copy
+
+```json
+{
+  "source": "/path/to/source.txt",
+  "destination": "/path/to/destination.txt",
+  "direction": "local",
+  "overwrite": false
 }
 ```
 
@@ -695,6 +752,8 @@ ENABLE_COMMAND_VALIDATION=false node build/index.js
 - **Output Size Limit**: Large command outputs are automatically truncated (default 5MB)
 - **Session Limit**: Maximum concurrent sessions prevents resource exhaustion (default 10)
 - **Session Timeout**: Inactive sessions are automatically cleaned up (default 20 minutes)
+- **Rate Limiting**: Commands per session are rate limited (default 60/minute)
+- **File Transfer Size**: Maximum file size for SFTP transfers (default 100MB)
 
 ### Input Validation
 
@@ -717,6 +776,9 @@ All limits and timeouts are configurable via environment variables:
 | `ENABLE_COMMAND_VALIDATION` | true | Enable dangerous command pattern blocking |
 | `COMMAND_BLACKLIST` | (empty) | Comma-separated list of blacklisted command prefixes |
 | `ALLOWED_WORKING_DIRECTORIES` | (all) | Comma-separated list of allowed directory prefixes |
+| `RATE_LIMIT_PER_MINUTE` | 60 | Maximum commands per minute per session |
+| `RATE_LIMIT_ENABLED` | true | Enable/disable rate limiting |
+| `MAX_FILE_TRANSFER_SIZE` | 104857600 | Maximum file size for transfers (100MB) |
 | `SSH_KEY_PATH` | ~/.ssh/id_rsa | Path to SSH private key |
 | `DEBUG` | false | Enable debug logging |
 
