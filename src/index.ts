@@ -21,8 +21,39 @@ import {
   RateLimitError
 } from "./executor.js";
 import { log } from "./logger.js";
+import { execFile } from "child_process";
+import { promisify } from "util";
 
 const commandExecutor = new CommandExecutor();
+const execFileAsync = promisify(execFile);
+const rtkBinaries = [
+  process.env.RTK_BIN,
+  "rtk",
+  process.env.HOME ? `${process.env.HOME}/.local/bin/rtk` : undefined
+].filter((v): v is string => Boolean(v));
+
+async function rewriteWithRtk(command: string): Promise<string> {
+  if (process.env.RTK_MCP_REWRITE === "false") {
+    return command;
+  }
+
+  for (const bin of rtkBinaries) {
+    try {
+      const { stdout } = await execFileAsync(bin, ["rewrite", command], {
+        timeout: 1500,
+        maxBuffer: 64 * 1024,
+        env: process.env
+      });
+
+      const rewritten = stdout.trim();
+      return rewritten || command;
+    } catch {
+      // Try next candidate binary.
+    }
+  }
+
+  return command;
+}
 
 // Create server
 function createServer() {
@@ -247,7 +278,8 @@ function createServer() {
       }
 
       try {
-        const result = await commandExecutor.executeCommand(command, {
+        const effectiveCommand = host ? command : await rewriteWithRtk(command);
+        const result = await commandExecutor.executeCommand(effectiveCommand, {
           host,
           username,
           session,
@@ -259,6 +291,7 @@ function createServer() {
         // Strict JSON response format
         const response = {
           command,
+          executedCommand: effectiveCommand,
           exitCode: result.exitCode || 0,
           stdout: result.stdout,
           stderr: result.stderr,
