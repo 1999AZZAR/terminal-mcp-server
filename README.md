@@ -53,6 +53,27 @@ Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for
 - **Stdio Connection**: Connect via standard input/output for direct integration
 - **Security Features**: Command validation, dangerous pattern detection, output size limits, session limits, rate limiting
 - **File Transfers**: Upload and download files via SFTP, local file copy operations
+- **RTK Integration**: Intelligent command rewriting and output summarization to optimize token usage for AI contexts
+
+## RTK Integration
+
+Terminal MCP Server integrates with [rtk](https://github.com/1999AZZAR/rtk) to significantly reduce token consumption and improve context efficiency.
+
+### Command Rewriting
+The server automatically attempts to rewrite common commands into their `rtk` optimized equivalents (e.g., `ls` -> `rtk ls`).
+- **Local**: Rewriting is performed if `rtk` is found in your `PATH` or specified via `RTK_BIN`.
+- **Remote**: If `rtk` is installed on the remote host, commands are wrapped in a shell-level rewriter (`RTK_CMD=$(rtk rewrite "cmd" || echo "cmd"); eval "$RTK_CMD"`) to optimize remote output without extra roundtrips.
+
+### Output Summarization
+For extremely large outputs (exceeding 10,000 characters), the server automatically utilizes `rtk smart` or `rtk log` to provide a concise technical summary instead of the raw data.
+- The response object includes an `rtkSummarized` boolean flag when this happens.
+- Original output length is preserved in the summary header.
+
+### Configuration
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RTK_BIN` | (rtk in PATH) | Path to the `rtk` binary if not in system PATH |
+| `RTK_MCP_REWRITE` | true | Set to `false` to disable all `rtk` optimizations |
 
 ## Available Resources
 
@@ -641,16 +662,16 @@ The transfer_file tool enables file transfers between local and remote hosts via
 
 The `execute_command` tool returns structured output in the following format:
 
-```
-Command: <command that was executed>
-Working Directory: <working directory if specified>
-Exit Code: <exit code of the command>
-
-STDOUT:
-<standard output of the command>
-
-STDERR:
-<standard error output of the command, if any>
+```json
+{
+  "command": "ls -la",
+  "executedCommand": "rtk ls -la",
+  "exitCode": 0,
+  "stdout": "...",
+  "stderr": "...",
+  "rtkSummarized": true,
+  "workingDirectory": "/path/to/dir"
+}
 ```
 
 ### Exit Codes
@@ -780,6 +801,8 @@ All limits and timeouts are configurable via environment variables:
 | `RATE_LIMIT_ENABLED` | true | Enable/disable rate limiting |
 | `MAX_FILE_TRANSFER_SIZE` | 104857600 | Maximum file size for transfers (100MB) |
 | `SSH_KEY_PATH` | ~/.ssh/id_rsa | Path to SSH private key |
+| `RTK_BIN` | (rtk in PATH) | Path to `rtk` binary |
+| `RTK_MCP_REWRITE` | true | Enable/disable `rtk` token optimizations |
 | `DEBUG` | false | Enable debug logging |
 
 ### Example Configuration
