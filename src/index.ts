@@ -21,20 +21,39 @@ import {
   RateLimitError
 } from "./executor.js";
 import { log } from "./logger.js";
-import { execFile } from "child_process";
+import { execFile, execSync } from "child_process";
 import { promisify } from "util";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
 const commandExecutor = new CommandExecutor();
 const execFileAsync = promisify(execFile);
 const rtkBinaries = [
   process.env.RTK_BIN,
-  "rtk",
-  process.env.HOME ? `${process.env.HOME}/.local/bin/rtk` : undefined
+  "rtk"
 ].filter((v): v is string => Boolean(v));
+
+let cachedRtkBinary: string | null | undefined = undefined;
 
 async function rewriteWithRtk(command: string): Promise<string> {
   if (process.env.RTK_MCP_REWRITE === "false") {
     return command;
+  }
+
+  // Use cached binary if available
+  if (cachedRtkBinary) {
+    try {
+      const { stdout } = await execFileAsync(cachedRtkBinary, ["rewrite", command], {
+        timeout: 1500,
+        maxBuffer: 64 * 1024,
+        env: process.env
+      });
+      return stdout.trim() || command;
+    } catch {
+      // If cached binary fails (e.g. was removed), reset cache and try others
+      cachedRtkBinary = undefined;
+    }
   }
 
   for (const bin of rtkBinaries) {
@@ -46,13 +65,66 @@ async function rewriteWithRtk(command: string): Promise<string> {
       });
 
       const rewritten = stdout.trim();
-      return rewritten || command;
+      if (rewritten) {
+        cachedRtkBinary = bin;
+        return rewritten;
+      }
     } catch {
       // Try next candidate binary.
     }
   }
 
   return command;
+}
+
+async function summarizeWithRtk(text: string, type: 'stdout' | 'stderr'): Promise<{ content: string; summarized: boolean }> {
+  if (!text || text.length < 10000) {
+    return { content: text, summarized: false };
+  }
+
+  // Find RTK binary if not cached yet
+  if (!cachedRtkBinary) {
+    for (const bin of rtkBinaries) {
+      try {
+        await execFileAsync(bin, ["--version"], { timeout: 500 });
+        cachedRtkBinary = bin;
+        break;
+      } catch { /* ignore */ }
+    }
+  }
+
+  if (!cachedRtkBinary) {
+    return { content: text, summarized: false };
+  }
+
+  const tmpFile = path.join(os.tmpdir(), `mcp-rtk-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+  
+  try {
+    fs.writeFileSync(tmpFile, text);
+    
+    // Use 'smart' for generic output or 'log' if it looks like logs
+    const subcommand = type === 'stderr' || text.includes('Error') || text.includes('warning') ? 'log' : 'smart';
+    
+    return new Promise((resolve) => {
+      execFile(cachedRtkBinary!, [subcommand, tmpFile], {
+        timeout: 3000,
+        env: process.env
+      }, (error, stdout) => {
+        // Cleanup temp file
+        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+        if (error || !stdout.trim()) {
+          resolve({ content: text, summarized: false });
+        } else {
+          const summary = `[RTK ${type.toUpperCase()} SUMMARY]\n${stdout.trim()}\n[Original length: ${text.length} chars]`;
+          resolve({ content: summary, summarized: true });
+        }
+      });
+    });
+  } catch (e) {
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+    return { content: text, summarized: false };
+  }
 }
 
 // Create server
@@ -278,7 +350,18 @@ function createServer() {
       }
 
       try {
-        const effectiveCommand = host ? command : await rewriteWithRtk(command);
+        let effectiveCommand = command;
+        if (process.env.RTK_MCP_REWRITE !== "false") {
+          if (host) {
+            // For remote commands, use shell-level rewrite if rtk is available remotely.
+            // Wrap in a subshell to avoid env var leaks or alias conflicts.
+            const escapedCommand = command.replace(/"/g, '\\"');
+            effectiveCommand = `RTK_CMD=$(rtk rewrite "${escapedCommand}" 2>/dev/null || echo "${escapedCommand}"); eval "$RTK_CMD"`;
+          } else {
+            effectiveCommand = await rewriteWithRtk(command);
+          }
+        }
+
         const result = await commandExecutor.executeCommand(effectiveCommand, {
           host,
           username,
@@ -288,13 +371,17 @@ function createServer() {
           timeout
         });
         
+        const { content: processedStdout, summarized: stdoutSummarized } = await summarizeWithRtk(result.stdout, 'stdout');
+        const { content: processedStderr, summarized: stderrSummarized } = await summarizeWithRtk(result.stderr, 'stderr');
+
         // Strict JSON response format
         const response = {
           command,
           executedCommand: effectiveCommand,
           exitCode: result.exitCode || 0,
-          stdout: result.stdout,
-          stderr: result.stderr,
+          stdout: processedStdout,
+          stderr: processedStderr,
+          rtkSummarized: stdoutSummarized || stderrSummarized,
           workingDirectory: workingDirectory || (host ? undefined : process.cwd())
         };
         
@@ -328,11 +415,15 @@ function createServer() {
         if (error instanceof CommandExecutionError) {
           // Even if there is an error (like non-zero exit code if caught by exec), return structured data if available
           if (error.stdout || error.stderr) {
+            const { content: processedStdout, summarized: stdoutSummarized } = await summarizeWithRtk(error.stdout || "", 'stdout');
+            const { content: processedStderr, summarized: stderrSummarized } = await summarizeWithRtk(error.stderr || "", 'stderr');
+
              const response = {
               command,
               exitCode: error.exitCode || 1,
-              stdout: error.stdout || "",
-              stderr: error.stderr || error.message,
+              stdout: processedStdout,
+              stderr: processedStderr,
+              rtkSummarized: stdoutSummarized || stderrSummarized,
               error: error.message
             };
             return {
