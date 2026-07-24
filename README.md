@@ -59,6 +59,8 @@ Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for
 
 ## RTK Integration
 
+![Blotcat pulling the lever on a hydraulic RTK press to crush a verbose log into a dense optimized token](assets/blotcat-rtk.jpg)
+
 Terminal MCP Server integrates with [rtk](https://github.com/1999AZZAR/rtk) to significantly reduce token consumption and improve context efficiency.
 
 ### Command Rewriting
