@@ -41,6 +41,8 @@ Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for
 
 ## Features
 
+![Blotcat standing at a command console routing pipes locally and remotely](assets/terminal-illustrations/01-execution.jpg)
+
 - **Local Command Execution**: Execute commands directly on the local machine
 - **Remote Command Execution**: Execute commands on remote hosts via SSH with automatic retry and connection health checks
 - **Session Persistence**: Support for persistent sessions that reuse the same terminal environment for a specified time (default 20 minutes)
@@ -630,6 +632,8 @@ The transfer_file tool enables file transfers between local and remote hosts via
 - Connection health is monitored and sessions are automatically reconnected when needed
 
 ### Session Management
+
+![Blotcat sitting in a protective session bubble with its working directory and environment variables](assets/terminal-illustrations/02-session.jpg)
 
 - Use the session parameter to maintain environment and working directory between related commands
 - For operations requiring specific environments, use the same session name
