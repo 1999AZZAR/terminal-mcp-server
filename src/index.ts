@@ -181,6 +181,11 @@ function createServer() {
                 type: "number",
                 description: "Command timeout in milliseconds (default: 30000, max: 600000)",
                 default: 30000
+              },
+              useRtk: {
+                type: "boolean",
+                description: "Whether to apply RTK token optimization and rewriting (default: true). Set to false for interactive commands or sudo.",
+                default: true
               }
             },
             required: ["command"]
@@ -225,6 +230,59 @@ function createServer() {
               }
             },
             required: ["source", "destination", "direction"]
+          }
+        },
+        {
+          name: "terminal_ls",
+          description: "List directory contents safely on remote or local hosts. Avoids shell quoting issues.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Path to list" },
+              host: { type: "string", description: "Remote host (optional)" },
+              username: { type: "string", description: "Username for SSH (required if host provided)" },
+              session: { type: "string", default: "default" },
+              all: { type: "boolean", description: "Show hidden files (like -a)", default: true },
+              long: { type: "boolean", description: "Use long listing format (like -l)", default: true },
+              useRtk: { type: "boolean", description: "Use RTK optimization (default: true)", default: true }
+            },
+            required: ["path"]
+          }
+        },
+        {
+          name: "terminal_grep",
+          description: "Search for a pattern in files safely on remote or local hosts.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              pattern: { type: "string", description: "Search pattern" },
+              path: { type: "string", description: "File or directory path" },
+              host: { type: "string", description: "Remote host (optional)" },
+              username: { type: "string", description: "Username for SSH (required if host provided)" },
+              session: { type: "string", default: "default" },
+              recursive: { type: "boolean", description: "Search recursively (like -r)", default: true },
+              ignoreCase: { type: "boolean", description: "Ignore case (like -i)", default: false },
+              lineNumber: { type: "boolean", description: "Show line numbers (like -n)", default: true },
+              useRtk: { type: "boolean", description: "Use RTK optimization (default: true)", default: true }
+            },
+            required: ["pattern", "path"]
+          }
+        },
+        {
+          name: "terminal_cat",
+          description: "Read file contents safely on remote or local hosts.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "File path to read" },
+              host: { type: "string", description: "Remote host (optional)" },
+              username: { type: "string", description: "Username for SSH (required if host provided)" },
+              session: { type: "string", default: "default" },
+              tail: { type: "boolean", description: "If true, reads the end of the file (like tail)", default: false },
+              lines: { type: "number", description: "Number of lines to read if using tail (like -n)", default: 100 },
+              useRtk: { type: "boolean", description: "Use RTK optimization (default: true)", default: true }
+            },
+            required: ["path"]
           }
         }
       ]
@@ -312,17 +370,50 @@ function createServer() {
         }
       }
 
-      // Handle execute_command tool
-      if (toolName !== "execute_command") {
+      // Handle execute_command and new terminal util tools
+      let command = "";
+      
+      if (toolName === "terminal_ls") {
+        const path = String(request.params.arguments?.path || ".");
+        const all = request.params.arguments?.all !== false;
+        const long = request.params.arguments?.long !== false;
+        command = `ls ${all ? '-a' : ''} ${long ? '-l' : ''} '${path.replace(/'/g, "'\\''")}'`;
+      } else if (toolName === "terminal_grep") {
+        const pattern = String(request.params.arguments?.pattern || "");
+        const path = String(request.params.arguments?.path || ".");
+        const recursive = request.params.arguments?.recursive !== false;
+        const ignoreCase = request.params.arguments?.ignoreCase === true;
+        const lineNumber = request.params.arguments?.lineNumber !== false;
+        
+        let flags = "-";
+        if (recursive) flags += "r";
+        if (ignoreCase) flags += "i";
+        if (lineNumber) flags += "n";
+        if (flags === "-") flags = "";
+        
+        command = `grep ${flags} '${pattern.replace(/'/g, "'\\''")}' '${path.replace(/'/g, "'\\''")}'`;
+      } else if (toolName === "terminal_cat") {
+        const path = String(request.params.arguments?.path || "");
+        const tail = request.params.arguments?.tail === true;
+        const lines = Number(request.params.arguments?.lines || 100);
+        
+        if (tail) {
+          command = `tail -n ${lines} '${path.replace(/'/g, "'\\''")}'`;
+        } else {
+          command = `cat '${path.replace(/'/g, "'\\''")}'`;
+        }
+      } else if (toolName === "execute_command") {
+        command = String(request.params.arguments?.command || "");
+      } else {
         throw new McpError(ErrorCode.MethodNotFound, "Unknown tool");
       }
       
       const host = request.params.arguments?.host ? String(request.params.arguments.host) : undefined;
       const username = request.params.arguments?.username ? String(request.params.arguments.username) : undefined;
       const session = String(request.params.arguments?.session || "default");
-      const command = String(request.params.arguments?.command);
       const workingDirectory = request.params.arguments?.workingDirectory ? String(request.params.arguments.workingDirectory) : undefined;
       const timeout = request.params.arguments?.timeout ? Number(request.params.arguments.timeout) : 30000;
+      const useRtk = request.params.arguments?.useRtk !== false;
       
       if (!command) {
         throw new McpError(ErrorCode.InvalidParams, "Command is required");
@@ -351,12 +442,17 @@ function createServer() {
 
       try {
         let effectiveCommand = command;
-        if (process.env.RTK_MCP_REWRITE !== "false") {
+        
+        // Auto-detect sudo or su, which conflict with RTK wrappers
+        const isSudo = command.trim().startsWith("sudo ") || command.trim().startsWith("su ");
+        const shouldRewrite = useRtk && !isSudo && process.env.RTK_MCP_REWRITE !== "false";
+        
+        if (shouldRewrite) {
           if (host) {
             // For remote commands, use shell-level rewrite if rtk is available remotely.
             // Wrap in a subshell to avoid env var leaks or alias conflicts.
-            const escapedCommand = command.replace(/"/g, '\\"');
-            effectiveCommand = `RTK_CMD=$(rtk rewrite "${escapedCommand}" 2>/dev/null || echo "${escapedCommand}"); eval "$RTK_CMD"`;
+            const escapedCommand = command.replace(/'/g, "'\\''");
+            effectiveCommand = `RTK_CMD=$(rtk rewrite '${escapedCommand}' 2>/dev/null || echo '${escapedCommand}'); eval "$RTK_CMD"`;
           } else {
             effectiveCommand = await rewriteWithRtk(command);
           }
@@ -371,8 +467,20 @@ function createServer() {
           timeout
         });
         
-        const { content: processedStdout, summarized: stdoutSummarized } = await summarizeWithRtk(result.stdout, 'stdout');
-        const { content: processedStderr, summarized: stderrSummarized } = await summarizeWithRtk(result.stderr, 'stderr');
+        let processedStdout = result.stdout;
+        let stdoutSummarized = false;
+        let processedStderr = result.stderr;
+        let stderrSummarized = false;
+        
+        if (shouldRewrite) {
+          const resOut = await summarizeWithRtk(result.stdout, 'stdout');
+          processedStdout = resOut.content;
+          stdoutSummarized = resOut.summarized;
+          
+          const resErr = await summarizeWithRtk(result.stderr, 'stderr');
+          processedStderr = resErr.content;
+          stderrSummarized = resErr.summarized;
+        }
 
         // Strict JSON response format
         const response = {

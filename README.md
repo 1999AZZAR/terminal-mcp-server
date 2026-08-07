@@ -20,9 +20,12 @@ Terminal MCP Server is a robust Model Context Protocol (MCP) server designed for
   - [Server Configuration](#server-configuration)
   - [Testing with MCP Inspector](#testing-with-mcp-inspector)
   - [Available NPM Scripts](#available-npm-scripts)
-- [The execute_command Tool](#the-execute_command-tool)
-  - [Parameters](#parameters)
-  - [Examples](#examples)
+- [Available Tools](#available-tools)
+  - [execute_command](#execute_command)
+  - [transfer_file](#transfer_file)
+  - [terminal_ls](#terminal_ls)
+  - [terminal_grep](#terminal_grep)
+  - [terminal_cat](#terminal_cat)
 - [Configuring with AI Assistants](#configuring-with-ai-assistants)
   - [Configuring with Roo Code](#configuring-with-roo-code)
   - [Configuring with Cline](#configuring-with-cline)
@@ -550,7 +553,55 @@ The transfer_file tool enables file transfers between local and remote hosts via
   "direction": "local",
   "overwrite": false
 }
+}
 ```
+
+### terminal_ls
+
+Safely lists directory contents on remote or local hosts, avoiding shell quoting issues that often occur with raw commands.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| path | string | Yes | The directory or file path to list |
+| host | string | No | Remote host to connect to (local if omitted) |
+| username | string | For remote | SSH username (required if host provided) |
+| session | string | No | Session name for connection reuse (default: 'default') |
+| all | boolean | No | Show hidden files, like `-a` (default: true) |
+| long | boolean | No | Use long listing format, like `-l` (default: true) |
+
+### terminal_grep
+
+Safely searches for patterns in files on remote or local hosts.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| pattern | string | Yes | Search pattern |
+| path | string | Yes | File or directory path to search |
+| host | string | No | Remote host to connect to (local if omitted) |
+| username | string | For remote | SSH username (required if host provided) |
+| session | string | No | Session name for connection reuse (default: 'default') |
+| recursive | boolean | No | Search recursively, like `-r` (default: true) |
+| ignoreCase | boolean | No | Ignore case, like `-i` (default: false) |
+| lineNumber | boolean | No | Show line numbers, like `-n` (default: true) |
+
+### terminal_cat
+
+Safely reads file contents on remote or local hosts.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| path | string | Yes | File path to read |
+| host | string | No | Remote host to connect to (local if omitted) |
+| username | string | For remote | SSH username (required if host provided) |
+| session | string | No | Session name for connection reuse (default: 'default') |
+| tail | boolean | No | If true, reads the end of the file like `tail` (default: false) |
+| lines | number | No | Number of lines to read if using tail (default: 100) |
 
 ## Configuring with AI Assistants
 
